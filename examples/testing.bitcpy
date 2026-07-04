@@ -1,0 +1,4 @@
+[ this just writes to the pc to immediately end the program ]
+
+06000000 ffffffff aaaaaaaa
+02000000 00000000 02000000
