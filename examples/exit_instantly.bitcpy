@@ -1,0 +1,4 @@
+[ this exists instantly by using the exit syscall with an exit status of 0 ]
+
+06000000 c3000000 10000000
+02000000 02000000 10000000

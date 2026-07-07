@@ -24,8 +24,8 @@ pub fn parseCode(gpa: Alloc, code: []const u8) ParseError!ArrayList(u8) {
                 'A'...'F' => try push4Bits(gpa, @intCast(c - 'A' + 10), &bytes, &is_misaligned),
                 '\t', '\n', '\r', ' ' => {},
                 '[' => is_comment = true,
-                ']' => return error.CloseCommentOutsideComment,
-                else => return error.UnexpectedChar,
+                ']' => return ParseError.CloseCommentOutsideComment,
+                else => return ParseError.UnexpectedChar,
             }
         }
     }
@@ -43,39 +43,147 @@ fn push4Bits(gpa: Alloc, bits: u4, bytes: *ArrayList(u8), is_misaligned: *bool) 
     }
 }
 
-pub const RunError = error{} || Alloc.Error;
+pub const RunError = error{
+    PcOutOfBounds,
+} || Alloc.Error || Io.Writer.Error;
 
-pub fn runProgram(gpa: Alloc, bytes: *ArrayList(u8)) RunError!void {
+pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8)) RunError!noreturn {
     // the first 256 bits of the program have special meaning.
     // this forces all of them to be in bounds, so the main loop
     // doesn't have to ever handle these weird edgecases.
     try ensureLength(gpa, bytes, 256 / 8);
 
     while (true) {
+        if (@import("builtin").mode == .Debug)
+            try dumpProgramBytes(io, bytes.items);
+
         const pc = bytesToU32(bytes.items[0..4].*);
 
-        // TODO handle going out of bounds
-        // in that case, do not extend array list, just pretend there are zeros out of bounds
-        const source = bytesToU32(bytes.items[pc / 8 ..][0..4].*);
-        const dest = bytesToU32(bytes.items[pc / 8 + 4 ..][0..4].*);
-        const count = bytesToU32(bytes.items[pc / 8 + 8 ..][0..4].*);
+        if (pc / 8 + 12 > bytes.items.len)
+            return RunError.PcOutOfBounds;
 
-        // TODO handle a LOT of edgecases
-        // - any of the 3 values may not be a multiple of 8
-        // - this may go out of bounds
-        // - if the write is out of bounds, extend the array list
-        // - source and dest may overlap
-        @memcpy(
-            bytes.items[dest / 8 ..][0 .. count / 8],
-            bytes.items[source / 8 ..][0 .. count / 8],
-        );
+        // TODO these can be replaced with versions that don't check for bounds
+        const source = readU32(bytes, pc);
+        const dest = readU32(bytes, pc + 0x20);
+        const count = readU32(bytes, pc + 0x40);
+
+        if (@import("builtin").mode == .Debug)
+            std.debug.print("running: [{x}, {x}, {x}]\n", .{ source, dest, count });
+
+        try bitcpyImpure(gpa, io, bytes, source, dest, count);
 
         const new_pc = bytesToU32(bytes.items[0..4].*) +| 0x60;
         bytes.items[0..4].* = u32ToBytes(new_pc);
-
-        if (new_pc == std.math.maxInt(u32))
-            break;
     }
+}
+
+fn readU32(bytes: *const ArrayList(u8), source: u32) u32 {
+    // FIXME i think this may have problems when source is close to 2^32
+
+    const bits_end: u3 = @intCast(source % 8);
+    if (bits_end == 0) {
+        const num_oob_bytes = source / 8 -| bytes.items.len;
+        const read_bytes = 4 -| num_oob_bytes;
+        const bytes_in_range = bytes.items[source / 8 ..][0..read_bytes];
+        var result_bytes: [4]u8 = .{0} ** 4;
+        @memcpy(result_bytes[0..bytes_in_range.len], bytes_in_range);
+        return bytesToU32(result_bytes);
+    } else {
+        const start_mask: u8 = @truncate(@as(u16, 0xff) << bits_end);
+        const end_mask: u8 = ~start_mask;
+        var result: u32 = 0;
+        if (source / 8 < bytes.items.len)
+            result |= (bytes.items[source / 8] & start_mask) >> bits_end;
+        for (bytes.items[source / 8 + 1 ..][0..3], 0..) |byte, i|
+            result |= @as(u32, byte) << (bits_end + @as(u5, @intCast(i * 8)));
+        if (source / 8 + 4 < bytes.items.len)
+            result |= (bytes.items[source / 8 + 4] & end_mask) << bits_end;
+        return result;
+    }
+}
+
+// these syscalls are similar to the linux x86_64 syscalls:
+// https://www.chromium.org/chromium-os/developer-library/reference/linux-constants/syscalls/
+const SyscallNumber = enum(u32) {
+    /// Exits the program with exit status `arg0`.
+    /// Will fail with -1 if `arg0` does not fit into a `u8`.
+    exit = 0x3c,
+
+    /// Will dump the entire program memory to `stderr`.
+    /// Has the same errors as `write`.
+    dumpmem = 0x200,
+
+    _,
+};
+
+pub fn bitcpyImpure(
+    gpa: Alloc,
+    io: Io,
+    bytes: *ArrayList(u8),
+    source: u32,
+    dest: u32,
+    count: u32,
+) Alloc.Error!void {
+    try bitcpy(gpa, bytes, source, dest, count);
+
+    // this condition guarantees that at least 1 bit was written to the bits in 0x20..0x40
+    if (dest < 0x40 and dest + count > 0x20 and count != 0) {
+        const syscall_number: SyscallNumber = @enumFromInt(bytesToU32(bytes.items[4..8].*));
+        switch (syscall_number) {
+            .exit => {
+                const status = bytesToU32(bytes.items[8..12].*);
+                if (std.math.cast(u8, status)) |s| {
+                    std.process.exit(s);
+                } else {
+                    @panic("TODO: write error to 0x20..0x40");
+                }
+            },
+            .dumpmem => {
+                dumpProgramBytes(io, bytes.items) catch |err| switch (err) {
+                    error.WriteFailed => @panic("TODO"),
+                };
+            },
+            _ => std.debug.panic(
+                "tried to perform syscall 0x{x}, but it hasn't been implemented yet",
+                .{syscall_number},
+            ),
+        }
+    }
+}
+
+// this is the pure version of bitcpyImpure, meaning it will never perform syscalls.
+pub fn bitcpy(
+    gpa: Alloc,
+    bytes: *ArrayList(u8),
+    source: u32,
+    dest: u32,
+    count: u32,
+) Alloc.Error!void {
+    _ = gpa;
+
+    // TODO handle a LOT of edgecases
+    // - any of the 3 values may not be a multiple of 8
+    // - this may go out of bounds
+    // - if the write is out of bounds, extend the array list
+    // - source and dest may overlap
+    // - the bits being read/written may be at an adress larger than 2^32
+    @memcpy(
+        bytes.items[dest / 8 ..][0 .. count / 8],
+        bytes.items[source / 8 ..][0 .. count / 8],
+    );
+
+    // if the 2 regions overlap, you need to either go forwards or backwards
+    // depending on this order. maybe i should check for the overlap first though.
+    //
+    // switch (std.math.order(source, dest)) {
+    //     .eq => {},
+    //     .lt => {
+    //         @panic("TODO");
+    //     },
+    //     .gt => {
+    //         @panic("TODO");
+    //     },
+    // }
 }
 
 fn ensureLength(gpa: Alloc, bytes: *ArrayList(u8), required_len: usize) !void {
@@ -118,4 +226,22 @@ fn transmute(From: type, To: type, value: From) To {
     const ptr: *align(alignment) const From = &from;
     const to_ptr: *align(alignment) const To = @ptrCast(ptr);
     return to_ptr.*;
+}
+
+fn dumpProgramBytes(io: Io, bytes: []const u8) Io.Writer.Error!void {
+    var buffer: [2048]u8 = undefined;
+    var file_writer: Io.File.Writer = .init(.stderr(), io, &buffer);
+    const writer = &file_writer.interface;
+
+    for (bytes, 0..) |byte, i| {
+        const lower = byte % 16;
+        const higher = byte >> 4;
+        try writer.print("{x}{x}", .{ lower, higher });
+        if (i % 4 == 3)
+            try writer.writeAll(if (i % 32 == 31) "\n" else " ");
+    }
+    if (bytes.len % 32 != 0)
+        try writer.writeAll("\n");
+
+    try writer.flush();
 }

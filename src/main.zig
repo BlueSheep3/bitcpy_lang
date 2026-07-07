@@ -5,37 +5,19 @@ const ArrayList = std.ArrayList;
 
 const bitcpy_lang = @import("bitcpy_lang");
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const parsed = try parseArgs(args, init.io);
     switch (parsed) {
-        .exit => return,
+        .exit => return 0,
         .run => |r| {
             const code = try readFile(r.filename, init.gpa, init.io);
             defer init.gpa.free(code);
             var bytes = try bitcpy_lang.parseCode(init.gpa, code);
             defer bytes.deinit(init.gpa);
-            try bitcpy_lang.runProgram(init.gpa, &bytes);
-            try print(init.io, .stdout(), "Program terminated with end state:\n", .{});
-            try printProgramBytes(init.io, bytes.items);
+            try bitcpy_lang.runProgram(init.gpa, init.io, &bytes);
         },
     }
-}
-
-fn printProgramBytes(io: Io, bytes: []const u8) !void {
-    var buffer: [2048]u8 = undefined;
-    var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const writer = &file_writer.interface;
-
-    for (bytes, 0..) |byte, i| {
-        const lower = byte % 16;
-        const higher = byte >> 4;
-        try writer.print("{x}{x}", .{ lower, higher });
-        if (i % 4 == 3)
-            try writer.writeAll(if (i % 32 == 31) "\n" else " ");
-    }
-
-    try writer.flush();
 }
 
 fn readFile(filename: []const u8, gpa: Alloc, io: Io) ![]u8 {
