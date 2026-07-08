@@ -15,7 +15,12 @@ pub fn main(init: std.process.Init) !u8 {
             defer init.gpa.free(code);
             var bytes = try bitcpy_lang.parseCode(init.gpa, code);
             defer bytes.deinit(init.gpa);
-            try bitcpy_lang.runProgram(init.gpa, init.io, &bytes);
+
+            const opts: bitcpy_lang.RunOptions = .{
+                .trace_command = r.trace_command,
+                .trace_memory = r.trace_memory,
+            };
+            try bitcpy_lang.runProgram(init.gpa, init.io, &bytes, opts);
         },
     }
 }
@@ -34,10 +39,15 @@ const ParseArgsResult = union(enum) {
     run: struct {
         filename: []const u8,
         extraargs: []const []const u8,
+        trace_command: bool,
+        trace_memory: bool,
     },
 };
 
 fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
+    var trace_command = false;
+    var trace_memory = false;
+
     var i: usize = 1; // skip the path of the interpreter
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -55,11 +65,14 @@ fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
             return .exit;
         } else if (isArg(arg, "-v", "--version")) {
             try print(io, .stdout(), "bitcpy_lang 0.0.0\n", .{});
+        } else if (isArg(arg, "-xc", "--tracecmd")) {
+            trace_command = true;
+        } else if (isArg(arg, "-xm", "--tracemem")) {
+            trace_memory = true;
         } else {
             try print(io, .stderr(), "unknown argument: {s}\n", .{arg});
             return error.UnknownArgument;
         }
-        // TODO other arguments
     }
     if (i == args.len) {
         try print(io, .stderr(), "no filename specified\n", .{});
@@ -69,6 +82,8 @@ fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
     return .{ .run = .{
         .filename = args[i],
         .extraargs = args[i + 1 ..],
+        .trace_command = trace_command,
+        .trace_memory = trace_memory,
     } };
 }
 
@@ -90,6 +105,8 @@ fn printHelp(io: Io) !void {
         \\
         \\  -h, --help       print out this help message and exit
         \\  -v, --version    print out version information and exit
+        \\  -xc, --tracecmd  print each command before executing it
+        \\  -xm, --tracemem  dump memory to stderr before each command
         \\  --               force the argument after this to be interpreted as the filename
         \\
     , .{});

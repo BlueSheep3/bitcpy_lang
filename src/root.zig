@@ -43,36 +43,45 @@ fn push4Bits(gpa: Alloc, bits: u4, bytes: *ArrayList(u8), is_misaligned: *bool) 
     }
 }
 
+pub const RunOptions = struct {
+    trace_command: bool = false,
+    trace_memory: bool = false,
+};
+
 pub const RunError = error{
     PcOutOfBounds,
 } || Alloc.Error || Io.Writer.Error;
 
-pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8)) RunError!noreturn {
+pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) RunError!noreturn {
     // the first 256 bits of the program have special meaning.
     // this forces all of them to be in bounds, so the main loop
     // doesn't have to ever handle these weird edgecases.
     try ensureLength(gpa, bytes, 256 / 8);
 
     while (true) {
-        if (@import("builtin").mode == .Debug)
+        if (opts.trace_memory)
             try dumpProgramBytes(io, bytes.items);
 
         const pc = bytesToU32(bytes.items[0..4].*);
 
+        // if this happens, you could technically still continue the program,
+        // but it's very likely that something went wrong here.
+        // this also makes reading the values below easier.
         if (pc / 8 + 12 > bytes.items.len)
             return RunError.PcOutOfBounds;
 
-        // TODO these can be replaced with versions that don't check for bounds
+        // PERF these can be replaced with versions that don't check for bounds
         const source = readU32(bytes, pc);
         const dest = readU32(bytes, pc + 0x20);
         const count = readU32(bytes, pc + 0x40);
 
-        if (@import("builtin").mode == .Debug)
-            std.debug.print("running: [{x}, {x}, {x}]\n", .{ source, dest, count });
+        if (opts.trace_command)
+            // FIXME these values should be printed with flipped digit order
+            std.debug.print("running: [{x:08}, {x:08}, {x:08}]\n", .{ source, dest, count });
 
         try bitcpyImpure(gpa, io, bytes, source, dest, count);
 
-        const new_pc = bytesToU32(bytes.items[0..4].*) +| 0x60;
+        const new_pc = bytesToU32(bytes.items[0..4].*) +% 0x60;
         bytes.items[0..4].* = u32ToBytes(new_pc);
     }
 }
@@ -144,7 +153,7 @@ pub fn bitcpyImpure(
                 };
             },
             _ => std.debug.panic(
-                "tried to perform syscall 0x{x}, but it hasn't been implemented yet",
+                "tried to perform syscall 0x{x:08}, but it hasn't been implemented yet",
                 .{syscall_number},
             ),
         }
@@ -159,7 +168,7 @@ pub fn bitcpy(
     dest: u32,
     count: u32,
 ) Alloc.Error!void {
-    _ = gpa;
+    try slow_bitcpy(gpa, bytes, source, dest, count);
 
     // TODO handle a LOT of edgecases
     // - any of the 3 values may not be a multiple of 8
@@ -167,23 +176,51 @@ pub fn bitcpy(
     // - if the write is out of bounds, extend the array list
     // - source and dest may overlap
     // - the bits being read/written may be at an adress larger than 2^32
-    @memcpy(
-        bytes.items[dest / 8 ..][0 .. count / 8],
-        bytes.items[source / 8 ..][0 .. count / 8],
-    );
+    // @memcpy(
+    //     bytes.items[dest / 8 ..][0 .. count / 8],
+    //     bytes.items[source / 8 ..][0 .. count / 8],
+    // );
+}
 
-    // if the 2 regions overlap, you need to either go forwards or backwards
-    // depending on this order. maybe i should check for the overlap first though.
-    //
-    // switch (std.math.order(source, dest)) {
-    //     .eq => {},
-    //     .lt => {
-    //         @panic("TODO");
-    //     },
-    //     .gt => {
-    //         @panic("TODO");
-    //     },
-    // }
+// the simplest (but also really slow) implementation of bitcpy.
+// you may use this to test whether the actual bitcpy implementation is correct.
+fn slow_bitcpy(
+    gpa: Alloc,
+    bytes: *ArrayList(u8),
+    source: u32,
+    dest: u32,
+    count: u32,
+) Alloc.Error!void {
+    switch (std.math.order(source, dest)) {
+        .lt => {
+            var i: u33 = count;
+            while (i > 0) {
+                i -= 1;
+                try bitcpy_single_bit(gpa, bytes, source + i, dest + i);
+            }
+        },
+        .gt => {
+            for (0..count) |index| {
+                const i: u33 = @intCast(index);
+                try bitcpy_single_bit(gpa, bytes, source + i, dest + i);
+            }
+        },
+        .eq => {},
+    }
+}
+
+fn bitcpy_single_bit(gpa: Alloc, bytes: *ArrayList(u8), source: u33, dest: u33) Alloc.Error!void {
+    var bit: u1 = 0;
+    if (source / 8 < bytes.items.len)
+        bit = @truncate(bytes.items[source / 8] >> @intCast(source % 8));
+
+    try ensureLength(gpa, bytes, dest / 8);
+    const mask = @as(u8, 1) << @intCast(dest % 8);
+    if (bit == 1) {
+        bytes.items[dest / 8] |= mask;
+    } else {
+        bytes.items[dest / 8] &= ~mask;
+    }
 }
 
 fn ensureLength(gpa: Alloc, bytes: *ArrayList(u8), required_len: usize) !void {
@@ -196,36 +233,16 @@ fn bytesToU32(bytes: [4]u8) u32 {
     // in future zig versions @bitCast will always convert ints as if they were
     // little endian, meaning this entire function could be replaced with a @bitCast
 
-    switch (@import("builtin").cpu.arch.endian()) {
-        .little => return transmute([4]u8, u32, bytes),
-        .big => {
-            const a, const b, const c, const d = bytes;
-            const reversed_bytes = .{ d, c, b, a };
-            return transmute([4]u8, u32, reversed_bytes);
-        },
-    }
+    const int = std.mem.bytesToValue(u32, &bytes);
+    return std.mem.toNative(u32, int, .little);
 }
 
 fn u32ToBytes(int: u32) [4]u8 {
     // in future zig versions @bitCast will always convert ints as if they were
     // little endian, meaning this entire function could be replaced with a @bitCast
 
-    switch (@import("builtin").cpu.arch.endian()) {
-        .little => return transmute(u32, [4]u8, int),
-        .big => {
-            const bytes: [4]u8 = transmute(u32, [4]u8, int);
-            const a, const b, const c, const d = bytes;
-            return .{ d, c, b, a };
-        },
-    }
-}
-
-fn transmute(From: type, To: type, value: From) To {
-    const alignment = @max(@alignOf(From), @alignOf(To));
-    const from: From align(alignment) = value;
-    const ptr: *align(alignment) const From = &from;
-    const to_ptr: *align(alignment) const To = @ptrCast(ptr);
-    return to_ptr.*;
+    const little_endian = std.mem.nativeTo(u32, int, .little);
+    return std.mem.toBytes(little_endian);
 }
 
 fn dumpProgramBytes(io: Io, bytes: []const u8) Io.Writer.Error!void {

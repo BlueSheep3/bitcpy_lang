@@ -1,0 +1,63 @@
+[ PC and filler values for syscall stuff ]
+[ .00000000 ] 00800000 aaaaaaaa 00000000 aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa
+
+[ constants ]
+[ .00100000 ] 00000000
+[ .02100000 ] ffffffff
+[ .04100000 ] 10000000
+
+[ .06100000 ] c3000000 [ exit syscall number ]
+[ .08100000 ] 00200000 [ dumpmem syscall number ]
+[ .0a100000 ] aaaaaaaa aaaaaaaa aaaaaaaa
+
+[ arrays that are used to simulate a for(0..20) |i| { ... } loop ]
+[ there's also a way to do this without shifting over the entire array, ]
+[ but i already wrote it this way, and i don't want to rewrite it now ]
+[ .00200000 ] 00102030 40506070 8090a0b0 c0d0e0f0 01112131 41516171 8191a1b1 c1d1e1f1
+[ .00300000 ] 00102030 40506070 8090a0b0 c0d0e0f0 01112131 41516171 8191a1b1 c1d1e1f1
+[ .00400000 ] ffffffff 00000000
+[ .04400000 ] ffffffff 00000000
+
+[ .08400000 ] aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa
+[ .00500000 ] aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa
+[ .00600000 ] aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa
+
+
+[ add function: X = X + Y (20 bit) (wraps around on overflow) ]
+[ this also supports a carry bit, by setting the bit at .1a700000 before calling ]
+[ to call: write return address, X, Y; then jump to call address ]
+
+[ .00700000 ] 0a700000 [ call address ] [ never change this ]
+[ .02700000 ] 04e00000 [ return address ]
+[ .04700000 ] 733a8e92 [ X ]
+[ .06700000 ] 8f30d120 [ Y ]
+[ .08700000 ] 00000000 [ i ] [ index, only bottom 5 bits are read ]
+[ .0a700000 ] 0000499e [ NCXY bits (N is new, C is carry), N and C lookup table ]
+[ .0c700000 ] 06800000 [ address to jump to for loop start ] [ never change this ]
+[ .0e700000 ] aaaaaaaa
+
+[ .00800000 ] 00200000 00300000 00100000 [ copy the index array ]
+[ .06800000 ] 00400000 04400000 02000000 [ copy the loop mask array ]
+[ .0c800000 ] 04400000 80000000 10000000 [ check if loop should keep going ]
+[ .02900000 ] 00100000 1a700000 10000000 [ if no, reset the carry bit ]
+[ .08900000 ] 02700000 00000000 02000000 [ if no, jump to return address ]
+[ .0e900000 ] aaaaaaaa aaaaaaaa
+[ .02a00000 ] 00300000 08700000 80000000 [ if yes, set i based on index array ]
+[ .08a00000 ] 08700000 0ea00000 50000000 [ set X bit in NCXY ]
+[ .0ea00000 ] 04700000 2a700000 10000000 [ set X bit in NCXY ]
+[ .04b00000 ] 08700000 0ab00000 50000000 [ set Y bit in NCXY ]
+[ .0ab00000 ] 06700000 3a700000 10000000 [ set Y bit in NCXY ]
+[ .00c00000 ] 1a700000 16c00000 30000000 [ copy lookup table at CXY to NC ]
+[ .06c00000 ] 0b700000 0a700000 20000000 [ copy lookup table at CXY to NC ]
+[ .0cc00000 ] 08700000 04d00000 50000000 [ set X bit to N ]
+[ .02d00000 ] 0a700000 04700000 10000000 [ set X bit to N ]
+[ .08d00000 ] 80300000 00300000 8f000000 [ shift the index array ]
+[ .0ed00000 ] 14400000 04400000 12000000 [ shift the loop mask array ]
+[ .04e00000 ] 0c700000 00000000 02000000 [ jump to start of loop ]
+
+[ code to run after the addition function finishes ]
+[ this code is only ran because the return address is initialized to go here, ]
+[ but in a larger code base, you would always set the return address before calling add ]
+
+[ .0ae00000 ] 08100000 02000000 02000000 [ dump memory to stderr ]
+[ .00f00000 ] 06100000 02000000 02000000 [ exit ]
