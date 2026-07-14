@@ -10,6 +10,7 @@ pub const ParseError = error{
 
 pub fn parseCode(gpa: Alloc, code: []const u8) ParseError!ArrayList(u8) {
     var bytes: ArrayList(u8) = .empty;
+    errdefer bytes.deinit(gpa);
     var is_misaligned = false;
     var is_comment = false;
 
@@ -32,7 +33,7 @@ pub fn parseCode(gpa: Alloc, code: []const u8) ParseError!ArrayList(u8) {
     return bytes;
 }
 
-fn push4Bits(gpa: Alloc, bits: u4, bytes: *ArrayList(u8), is_misaligned: *bool) !void {
+fn push4Bits(gpa: Alloc, bits: u4, bytes: *ArrayList(u8), is_misaligned: *bool) Alloc.Error!void {
     if (is_misaligned.*) {
         const last = &bytes.items[bytes.items.len - 1];
         last.* |= @as(u8, bits) << 4;
@@ -89,7 +90,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
 fn readU32(bytes: *const ArrayList(u8), source: u32) u32 {
     // FIXME i think this may have problems when source is close to 2^32
 
-    const bits_end: u3 = @intCast(source % 8);
+    const bits_end = @as(u3, @truncate(source));
     if (bits_end == 0) {
         const num_oob_bytes = source / 8 -| bytes.items.len;
         const read_bytes = 4 -| num_oob_bytes;
@@ -114,13 +115,40 @@ fn readU32(bytes: *const ArrayList(u8), source: u32) u32 {
 // these syscalls are similar to the linux x86_64 syscalls:
 // https://www.chromium.org/chromium-os/developer-library/reference/linux-constants/syscalls/
 const SyscallNumber = enum(u32) {
+    /// Writes the first `arg2` bytes starting at address `arg1` to file descriptor `arg0`.
+    ///
+    /// # Errors
+    /// - `misaligned` if `arg1` or `arg2` are misaligned.
+    /// - `write_failed` if the write fails for any reason.
+    write = 0x01,
+
     /// Exits the program with exit status `arg0`.
-    /// Will fail with -1 if `arg0` does not fit into a `u8`.
+    ///
+    /// The exit status will be truncated to fit into a `u8`.
+    /// This cannot fail.
     exit = 0x3c,
 
     /// Will dump the entire program memory to `stderr`.
-    /// Has the same errors as `write`.
+    ///
+    /// # Errors
+    /// - `write_failed` if the write fails for any reason.
     dumpmem = 0x200,
+
+    _,
+};
+
+const SyscallError = enum(u16) {
+    /// There does not exist a syscall with the given syscall number.
+    unkown = 0x0,
+    /// The syscall you are trying to call was disabled.
+    disabled = 0x1,
+    /// A pointer or length that you used in a syscall was not a multiple of 8.
+    misaligned = 0x2,
+
+    /// A write failed for some reason.
+    /// For example: the file descriptor wasn't open,
+    /// you didn't have write permissions, etc...
+    write_failed = 0xf,
 
     _,
 };
@@ -139,17 +167,30 @@ pub fn bitcpyImpure(
     if (dest < 0x40 and dest + count > 0x20 and count != 0) {
         const syscall_number: SyscallNumber = @enumFromInt(bytesToU32(bytes.items[4..8].*));
         switch (syscall_number) {
+            .write => {
+                const fd = bytesToU32(bytes.items[8..12].*);
+                const buf = bytesToU32(bytes.items[12..16].*);
+                const len = bytesToU32(bytes.items[16..20].*);
+
+                // FIXME handle out of bounds
+                if (buf % 8 != 0 or len % 8 != 0)
+                    @panic("TODO: write error");
+                const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+                // FIXME file handles are not integers on windows
+                const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
+
+                // is this really the best way to do this write?
+                var buffer: [1024]u8 = undefined;
+                var writer = file.writer(io, &buffer);
+                writer.interface.writeAll(slice) catch @panic("TODO: write error");
+                writer.flush() catch @panic("TODO: write error");
+            },
             .exit => {
-                const status = bytesToU32(bytes.items[8..12].*);
-                if (std.math.cast(u8, status)) |s| {
-                    std.process.exit(s);
-                } else {
-                    @panic("TODO: write error to 0x20..0x40");
-                }
+                std.process.exit(bytes.items[8]);
             },
             .dumpmem => {
                 dumpProgramBytes(io, bytes.items) catch |err| switch (err) {
-                    error.WriteFailed => @panic("TODO"),
+                    error.WriteFailed => @panic("TODO: write error"),
                 };
             },
             _ => std.debug.panic(
@@ -212,10 +253,10 @@ fn slow_bitcpy(
 fn bitcpy_single_bit(gpa: Alloc, bytes: *ArrayList(u8), source: u33, dest: u33) Alloc.Error!void {
     var bit: u1 = 0;
     if (source / 8 < bytes.items.len)
-        bit = @truncate(bytes.items[source / 8] >> @intCast(source % 8));
+        bit = @truncate(bytes.items[source / 8] >> @as(u3, @truncate(source)));
 
     try ensureLength(gpa, bytes, dest / 8);
-    const mask = @as(u8, 1) << @intCast(dest % 8);
+    const mask = @as(u8, 1) << @as(u3, @truncate(dest));
     if (bit == 1) {
         bytes.items[dest / 8] |= mask;
     } else {
@@ -251,7 +292,7 @@ fn dumpProgramBytes(io: Io, bytes: []const u8) Io.Writer.Error!void {
     const writer = &file_writer.interface;
 
     for (bytes, 0..) |byte, i| {
-        const lower = byte % 16;
+        const lower = byte % (1 << 4);
         const higher = byte >> 4;
         try writer.print("{x}{x}", .{ lower, higher });
         if (i % 4 == 3)

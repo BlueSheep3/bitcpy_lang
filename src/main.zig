@@ -5,11 +5,11 @@ const ArrayList = std.ArrayList;
 
 const bitcpy_lang = @import("bitcpy_lang");
 
-pub fn main(init: std.process.Init) !u8 {
+pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const parsed = try parseArgs(args, init.io);
     switch (parsed) {
-        .exit => return 0,
+        .exit => return,
         .run => |r| {
             const code = try readFile(r.filename, init.gpa, init.io);
             defer init.gpa.free(code);
