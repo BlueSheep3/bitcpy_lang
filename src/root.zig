@@ -114,15 +114,30 @@ fn readU32(bytes: *const ArrayList(u8), source: u32) u32 {
 
 // these syscalls are similar to the linux x86_64 syscalls:
 // https://www.chromium.org/chromium-os/developer-library/reference/linux-constants/syscalls/
+
+/// The arguments used here are the first 256 bits split into 32 bits chunks indexed from 0 to 7.
+/// This means that `arg0` is the program counter and `arg1` is the syscall number.
+/// When a syscall "returns" something or errors, it is written to `arg1`.
+/// The most significant bit of the return value is 1 if and only if it was an error.
 const SyscallNumber = enum(u32) {
-    /// Writes the first `arg2` bytes starting at address `arg1` to file descriptor `arg0`.
+    /// Reads from file descriptor `arg2` and writes the result into the buffer at `arg3`.
+    /// This will read a maximum of `arg4` bytes.
+    /// Returns the number of bytes read.
+    /// The return value is less than `arg4` if and only if the end of the file was reached.
     ///
     /// # Errors
-    /// - `misaligned` if `arg1` or `arg2` are misaligned.
+    /// - `misaligned` if `arg3` or `arg4` are misaligned.
+    /// - `read_failed` if the read fails for any reason.
+    read = 0x00,
+
+    /// Writes the first `arg4` bytes starting at address `arg3` to file descriptor `arg2`.
+    ///
+    /// # Errors
+    /// - `misaligned` if `arg3` or `arg4` are misaligned.
     /// - `write_failed` if the write fails for any reason.
     write = 0x01,
 
-    /// Exits the program with exit status `arg0`.
+    /// Exits the program with exit status `arg2`.
     ///
     /// The exit status will be truncated to fit into a `u8`.
     /// This cannot fail.
@@ -145,13 +160,26 @@ const SyscallError = enum(u16) {
     /// A pointer or length that you used in a syscall was not a multiple of 8.
     misaligned = 0x2,
 
+    /// A read failed for some reason.
+    /// For example: the file descriptor wasn't open, you didn't have read permissions, etc...
+    read_failed = 0x10,
     /// A write failed for some reason.
-    /// For example: the file descriptor wasn't open,
-    /// you didn't have write permissions, etc...
-    write_failed = 0xf,
+    /// For example: the file descriptor wasn't open, you didn't have write permissions, etc...
+    write_failed = 0x11,
 
     _,
 };
+
+fn readSyscallArg(bytes: *ArrayList(u8), comptime arg_index: u3) u32 {
+    return bytesToU32(bytes.items[arg_index * 4 ..][0..4]);
+}
+fn writeSyscallReturn(bytes: *ArrayList(u8), value: u31) void {
+    @memcpy(bytes.items[4..8], &u32ToBytes(value));
+}
+fn writeSyscallError(bytes: *ArrayList(u8), err: SyscallError) void {
+    const int: u32 = @as(u32, err) | 0x8000_0000;
+    @memcpy(bytes.items[4..8], &u32ToBytes(int));
+}
 
 pub fn bitcpyImpure(
     gpa: Alloc,
@@ -165,16 +193,39 @@ pub fn bitcpyImpure(
 
     // this condition guarantees that at least 1 bit was written to the bits in 0x20..0x40
     if (dest < 0x40 and dest + count > 0x20 and count != 0) {
-        const syscall_number: SyscallNumber = @enumFromInt(bytesToU32(bytes.items[4..8].*));
+        const syscall_number: SyscallNumber = @enumFromInt(readSyscallArg(bytes, 1));
         switch (syscall_number) {
+            .read => {
+                const fd = readSyscallArg(bytes, 2);
+                const buf = readSyscallArg(bytes, 3);
+                const len = readSyscallArg(bytes, 4);
+
+                // FIXME handle out of bounds
+                // is there any good way to handle OOB besides always
+                // extending memory to fit this entire buffer?
+                if (buf % 8 != 0 or len % 8 != 0)
+                    writeSyscallError(bytes, .misaligned);
+                const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+                // FIXME file handles are not integers on windows
+                const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
+
+                var buffer: [1024]u8 = undefined;
+                var reader = file.reader(io, &buffer);
+                const read_count = reader.interface.readSliceShort(slice) catch
+                    writeSyscallError(bytes, .read_failed);
+
+                // since len is a u32, len / 8 fits into a u29, which means that you can
+                // read at most std.math.maxInt(u29) bytes, so this will fit into a u31.
+                writeSyscallReturn(bytes, @intCast(read_count));
+            },
             .write => {
-                const fd = bytesToU32(bytes.items[8..12].*);
-                const buf = bytesToU32(bytes.items[12..16].*);
-                const len = bytesToU32(bytes.items[16..20].*);
+                const fd = readSyscallArg(bytes, 2);
+                const buf = readSyscallArg(bytes, 3);
+                const len = readSyscallArg(bytes, 4);
 
                 // FIXME handle out of bounds
                 if (buf % 8 != 0 or len % 8 != 0)
-                    @panic("TODO: write error");
+                    writeSyscallError(bytes, .misaligned);
                 const slice = bytes.items[buf / 8 ..][0 .. len / 8];
                 // FIXME file handles are not integers on windows
                 const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
@@ -182,16 +233,14 @@ pub fn bitcpyImpure(
                 // is this really the best way to do this write?
                 var buffer: [1024]u8 = undefined;
                 var writer = file.writer(io, &buffer);
-                writer.interface.writeAll(slice) catch @panic("TODO: write error");
-                writer.flush() catch @panic("TODO: write error");
+                writer.interface.writeAll(slice) catch writeSyscallError(bytes, .write_failed);
+                writer.flush() catch writeSyscallError(bytes, .write_failed);
             },
             .exit => {
                 std.process.exit(bytes.items[8]);
             },
             .dumpmem => {
-                dumpProgramBytes(io, bytes.items) catch |err| switch (err) {
-                    error.WriteFailed => @panic("TODO: write error"),
-                };
+                dumpProgramBytes(io, bytes.items) catch writeSyscallError(bytes, .write_failed);
             },
             _ => std.debug.panic(
                 "tried to perform syscall 0x{x:08}, but it hasn't been implemented yet",
