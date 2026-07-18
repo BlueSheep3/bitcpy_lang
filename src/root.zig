@@ -77,8 +77,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
         const count = readU32(bytes, pc + 0x40);
 
         if (opts.trace_command)
-            // FIXME these values should be printed with flipped digit order
-            std.debug.print("running: [{x:08}, {x:08}, {x:08}]\n", .{ source, dest, count });
+            traceCommand(io, source, dest, count) catch {};
 
         try bitcpyImpure(gpa, io, bytes, source, dest, count);
 
@@ -121,8 +120,8 @@ fn readU32(bytes: *const ArrayList(u8), source: u32) u32 {
 /// The most significant bit of the return value is 1 if and only if it was an error.
 const SyscallNumber = enum(u32) {
     /// Reads from file descriptor `arg2` and writes the result into the buffer at `arg3`.
-    /// This will read a maximum of `arg4` bytes.
-    /// Returns the number of bytes read.
+    /// This will read a maximum of `arg4` bits.
+    /// Returns the number of bits read.
     /// The return value is less than `arg4` if and only if the end of the file was reached.
     ///
     /// # Errors
@@ -130,7 +129,7 @@ const SyscallNumber = enum(u32) {
     /// - `read_failed` if the read fails for any reason.
     read = 0x00,
 
-    /// Writes the first `arg4` bytes starting at address `arg3` to file descriptor `arg2`.
+    /// Writes the first `arg4` bits starting at address `arg3` to file descriptor `arg2`.
     ///
     /// # Errors
     /// - `misaligned` if `arg3` or `arg4` are misaligned.
@@ -170,15 +169,30 @@ const SyscallError = enum(u16) {
     _,
 };
 
-fn readSyscallArg(bytes: *ArrayList(u8), comptime arg_index: u3) u32 {
-    return bytesToU32(bytes.items[arg_index * 4 ..][0..4]);
+const SyscallReturn = union(enum) {
+    /// Write `val` to `arg1` with the most significant bit set to 0.
+    val: u31,
+    /// Write the number of `err` to `arg1` with the most significant bit set to 1.
+    err: SyscallError,
+    /// Don't write to `arg1`.
+    none,
+};
+
+fn readSyscallArg(bytes: *const ArrayList(u8), comptime arg_index: u3) u32 {
+    const index = @as(u32, arg_index) * 4;
+    return bytesToU32(bytes.items[index..][0..4].*);
 }
-fn writeSyscallReturn(bytes: *ArrayList(u8), value: u31) void {
-    @memcpy(bytes.items[4..8], &u32ToBytes(value));
-}
-fn writeSyscallError(bytes: *ArrayList(u8), err: SyscallError) void {
-    const int: u32 = @as(u32, err) | 0x8000_0000;
-    @memcpy(bytes.items[4..8], &u32ToBytes(int));
+fn writeSyscallReturn(bytes: *ArrayList(u8), ret: SyscallReturn) void {
+    switch (ret) {
+        .val => |val| {
+            @memcpy(bytes.items[4..8], &u32ToBytes(val));
+        },
+        .err => |err| {
+            const int: u32 = @as(u32, @intFromEnum(err)) | 0x8000_0000;
+            @memcpy(bytes.items[4..8], &u32ToBytes(int));
+        },
+        .none => {},
+    }
 }
 
 pub fn bitcpyImpure(
@@ -195,52 +209,12 @@ pub fn bitcpyImpure(
     if (dest < 0x40 and dest + count > 0x20 and count != 0) {
         const syscall_number: SyscallNumber = @enumFromInt(readSyscallArg(bytes, 1));
         switch (syscall_number) {
-            .read => {
-                const fd = readSyscallArg(bytes, 2);
-                const buf = readSyscallArg(bytes, 3);
-                const len = readSyscallArg(bytes, 4);
-
-                // FIXME handle out of bounds
-                // is there any good way to handle OOB besides always
-                // extending memory to fit this entire buffer?
-                if (buf % 8 != 0 or len % 8 != 0)
-                    writeSyscallError(bytes, .misaligned);
-                const slice = bytes.items[buf / 8 ..][0 .. len / 8];
-                // FIXME file handles are not integers on windows
-                const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
-
-                var buffer: [1024]u8 = undefined;
-                var reader = file.reader(io, &buffer);
-                const read_count = reader.interface.readSliceShort(slice) catch
-                    writeSyscallError(bytes, .read_failed);
-
-                // since len is a u32, len / 8 fits into a u29, which means that you can
-                // read at most std.math.maxInt(u29) bytes, so this will fit into a u31.
-                writeSyscallReturn(bytes, @intCast(read_count));
-            },
-            .write => {
-                const fd = readSyscallArg(bytes, 2);
-                const buf = readSyscallArg(bytes, 3);
-                const len = readSyscallArg(bytes, 4);
-
-                // FIXME handle out of bounds
-                if (buf % 8 != 0 or len % 8 != 0)
-                    writeSyscallError(bytes, .misaligned);
-                const slice = bytes.items[buf / 8 ..][0 .. len / 8];
-                // FIXME file handles are not integers on windows
-                const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
-
-                // is this really the best way to do this write?
-                var buffer: [1024]u8 = undefined;
-                var writer = file.writer(io, &buffer);
-                writer.interface.writeAll(slice) catch writeSyscallError(bytes, .write_failed);
-                writer.flush() catch writeSyscallError(bytes, .write_failed);
-            },
-            .exit => {
-                std.process.exit(bytes.items[8]);
-            },
+            .read => writeSyscallReturn(bytes, doSyscallRead(io, bytes)),
+            .write => writeSyscallReturn(bytes, doSyscallWrite(io, bytes)),
+            .exit => std.process.exit(bytes.items[8]),
             .dumpmem => {
-                dumpProgramBytes(io, bytes.items) catch writeSyscallError(bytes, .write_failed);
+                dumpProgramBytes(io, bytes.items) catch
+                    writeSyscallReturn(bytes, .{ .err = .write_failed });
             },
             _ => std.debug.panic(
                 "tried to perform syscall 0x{x:08}, but it hasn't been implemented yet",
@@ -248,6 +222,54 @@ pub fn bitcpyImpure(
             ),
         }
     }
+}
+
+fn doSyscallRead(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
+    const fd = readSyscallArg(bytes, 2);
+    const buf = readSyscallArg(bytes, 3);
+    const raw_len = readSyscallArg(bytes, 4);
+
+    // the return value is how many bits where read, and it must fit into a u31, so we'll
+    // limit how many bits you can read here, since read only reads UP TO that many bits anyway
+    const len = @min(raw_len, (std.math.maxInt(u31) / 8) * 8);
+
+    // FIXME handle out of bounds
+    // is there any good way to handle OOB besides always
+    // extending memory to fit this entire buffer?
+    if (buf % 8 != 0 or len % 8 != 0)
+        return .{ .err = .misaligned };
+    const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+    // FIXME file handles are not integers on windows
+    const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
+
+    var buffer: [1024]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    const read_count = reader.interface.readSliceShort(slice) catch
+        return .{ .err = .read_failed };
+
+    // read_count is at most len, which fits into a u31, so this fits as well
+    return .{ .val = @intCast(read_count) };
+}
+
+fn doSyscallWrite(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
+    const fd = readSyscallArg(bytes, 2);
+    const buf = readSyscallArg(bytes, 3);
+    const len = readSyscallArg(bytes, 4);
+
+    // FIXME handle out of bounds
+    if (buf % 8 != 0 or len % 8 != 0)
+        return .{ .err = .misaligned };
+    const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+    // FIXME file handles are not integers on windows
+    const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
+
+    // is this really the best way to do this write?
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    writer.interface.writeAll(slice) catch return .{ .err = .write_failed };
+    writer.flush() catch return .{ .err = .write_failed };
+
+    return .none;
 }
 
 // this is the pure version of bitcpyImpure, meaning it will never perform syscalls.
@@ -335,9 +357,32 @@ fn u32ToBytes(int: u32) [4]u8 {
     return std.mem.toBytes(little_endian);
 }
 
+fn traceCommand(io: Io, source: u32, dest: u32, count: u32) Io.Writer.Error!void {
+    var buffer: [64]u8 = undefined;
+    var file_writer = Io.File.stderr().writer(io, &buffer);
+    const writer = &file_writer.interface;
+
+    try writer.writeAll("running: [");
+    try writeFlippedHexInt(writer, source);
+    try writer.writeAll(", ");
+    try writeFlippedHexInt(writer, dest);
+    try writer.writeAll(", ");
+    try writeFlippedHexInt(writer, count);
+    try writer.writeAll("]\n");
+    try writer.flush();
+}
+
+fn writeFlippedHexInt(writer: *Io.Writer, int: u32) Io.Writer.Error!void {
+    for (u32ToBytes(int)) |byte| {
+        const lower = byte % (1 << 4);
+        const higher = byte >> 4;
+        try writer.print("{x}{x}", .{ lower, higher });
+    }
+}
+
 fn dumpProgramBytes(io: Io, bytes: []const u8) Io.Writer.Error!void {
     var buffer: [2048]u8 = undefined;
-    var file_writer: Io.File.Writer = .init(.stderr(), io, &buffer);
+    var file_writer = Io.File.stderr().writer(io, &buffer);
     const writer = &file_writer.interface;
 
     for (bytes, 0..) |byte, i| {
