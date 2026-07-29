@@ -57,7 +57,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
     // the first 256 bits of the program have special meaning.
     // this forces all of them to be in bounds, so the main loop
     // doesn't have to ever handle these weird edgecases.
-    try ensureLength(gpa, bytes, 256 / 8);
+    try ensureLen(gpa, bytes, 256 / 8);
 
     while (true) {
         if (opts.trace_memory)
@@ -326,7 +326,7 @@ fn bitcpy_single_bit(gpa: Alloc, bytes: *ArrayList(u8), source: u33, dest: u33) 
     if (source / 8 < bytes.items.len)
         bit = @truncate(bytes.items[source / 8] >> @as(u3, @truncate(source)));
 
-    try ensureLength(gpa, bytes, dest / 8);
+    try ensureLen(gpa, bytes, 1 + dest / 8);
     const mask = @as(u8, 1) << @as(u3, @truncate(dest));
     if (bit == 1) {
         bytes.items[dest / 8] |= mask;
@@ -335,10 +335,12 @@ fn bitcpy_single_bit(gpa: Alloc, bytes: *ArrayList(u8), source: u33, dest: u33) 
     }
 }
 
-fn ensureLength(gpa: Alloc, bytes: *ArrayList(u8), required_len: usize) !void {
-    const extra_len: usize = required_len -| bytes.items.len;
-    for (0..extra_len) |_|
-        try bytes.append(gpa, 0);
+fn ensureLen(gpa: Alloc, bytes: *ArrayList(u8), required_len: usize) Alloc.Error!void {
+    const n = required_len -| bytes.items.len;
+    if (n > 0) {
+        @branchHint(.unlikely);
+        try bytes.appendNTimes(gpa, 0, n);
+    }
 }
 
 fn bytesToU32(bytes: [4]u8) u32 {
