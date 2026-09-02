@@ -1,0 +1,59 @@
+[ PC and filler values for syscall stuff ]
+[ .00000000 ] 04700000 aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa
+
+[ lookup table for hex digits ]
+[ .00100000 ] 03132333 43536373 83931626 36465666
+[ lookup table for loop of length 8 ]
+[ .08100000 ] 12345678
+[ .0a100000 ] ff000000
+
+[ .0c100000 ] 00000000
+[ .0e100000 ] aaaaaaaa
+
+
+[ fmt_int function: writes X as a string into the buffer B ]
+[ X will be formatted as a hexadecimal number in little endian ]
+[ this will always write exactly 40 bits into B, and B must be aligned to 40 bits ]
+[ to call: write return address, X, B; then jump to call address ]
+
+[ .00200000 ] 04200000 [ call address ] [ never change this ]
+[ .02200000 ] aaaaaaaa [ return address ]
+[ .04200000 ] aaaaaaaa [ X ]
+[ .06200000 ] aaaaaaaa [ B ]
+[ .08200000 ] aaaaaaaa [ i ]
+
+[ .0a200000 ] 0c100000 08200000 02000000 [ i = 0 ]
+[ .00300000 ] 06200000 0a400000 02000000 [ set write location of (1) to B ]
+[ .06300000 ] 08200000 3a400000 30000000 [ (loop start): adjust write location of (1) based on i ]
+[ .0c300000 ] 08200000 22400000 30000000 [      write (hex_digits at (X at i)) to B ]
+[ .02400000 ] 04200000 38400000 40000000 [      write (hex_digits at (X at i)) to B ]
+[ .08400000 ] 00100000 aaaaaaaa 80000000 [ (1): write (hex_digits at (X at i)) to B ]
+[ .0e400000 ] 08200000 24500000 30000000 [ i += 1 ]
+[ .04500000 ] 08100000 08200000 40000000 [ i += 1 ]
+[ .0a500000 ] 08200000 00600000 40000000 [ if loop should not end, jump to (loop start) ]
+[ .00600000 ] 0a100000 5a600000 10000000 [ if loop should not end, jump to (loop start) ]
+[ .06600000 ] 02700000 00000000 02000000 [ if loop should not end, jump to (loop start) ]
+[ .0c600000 ] 02200000 00000000 02000000 [ return ]
+
+[ .02700000 ] 00300000 [ loop start address ]
+
+
+[ main code ]
+
+[ .04700000 ] 0aa00000 02200000 02000000 [ write return address ]
+[ .0a700000 ] 0ca00000 04200000 02000000 [ write X ]
+[ .00800000 ] 04b00000 06200000 02000000 [ write B ]
+[ .06800000 ] 00200000 00000000 02000000 [ call fmt_int ]
+[ .0c800000 ] 0c100000 04000000 02000000 [ write arg2 / file descriptor = 0 ]
+[ .02900000 ] 04b00000 06000000 02000000 [ write arg3 / buffer ]
+[ .08900000 ] 06b00000 08000000 02000000 [ write arg4 / length ]
+[ .0e900000 ] 0ea00000 02000000 02000000 [ do write syscall ]
+[ .04a00000 ] 00b00000 02000000 02000000 [ do exit syscall ]
+
+[ .0aa00000 ] 06800000 [ return address ]
+[ .0ca00000 ] 123d5678 [ value of X ]
+[ .0ea00000 ] 10000000 [ write syscall number ]
+[ .00b00000 ] c3000000 [ exit syscall number ]
+[ .02b00000 ] aaaaaaaa
+[ .04b00000 ] 08b00000 04000000 [ buffer B length and address ]
+[ .08b00000 ] aaaaaaaa aaaaaaaa [ buffer B memory (must be aligned to 40 bits) ]

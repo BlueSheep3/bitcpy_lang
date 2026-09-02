@@ -387,6 +387,7 @@ fn dumpProgramBytes(io: Io, bytes: []const u8) Io.Writer.Error!void {
     var file_writer = Io.File.stderr().writer(io, &buffer);
     const writer = &file_writer.interface;
 
+    try writer.writeAll("\n");
     for (bytes, 0..) |byte, i| {
         const lower = byte % (1 << 4);
         const higher = byte >> 4;
