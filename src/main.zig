@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn readFile(filename: []const u8, gpa: Alloc, io: Io) ![]u8 {
-    const file = try Io.Dir.openFile(.cwd(), io, filename, .{ .allow_directory = false });
+    const file = try Io.Dir.cwd().openFile(io, filename, .{ .allow_directory = false });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);

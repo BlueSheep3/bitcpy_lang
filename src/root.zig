@@ -63,7 +63,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
         if (opts.trace_memory)
             try dumpProgramBytes(io, bytes.items);
 
-        const pc = bytesToU32(bytes.items[0..4].*);
+        const pc: u32 = @bitCast(bytes.items[0..4].*);
 
         // if this happens, you could technically still continue the program,
         // but it's very likely that something went wrong here.
@@ -81,8 +81,8 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
 
         try bitcpyImpure(gpa, io, bytes, source, dest, count);
 
-        const new_pc = bytesToU32(bytes.items[0..4].*) +% 0x60;
-        bytes.items[0..4].* = u32ToBytes(new_pc);
+        const new_pc = @as(u32, @bitCast(bytes.items[0..4].*)) +% 0x60;
+        bytes.items[0..4].* = @bitCast(new_pc);
     }
 }
 
@@ -94,9 +94,9 @@ fn readU32(bytes: *const ArrayList(u8), source: u32) u32 {
         const num_oob_bytes = source / 8 -| bytes.items.len;
         const read_bytes = 4 -| num_oob_bytes;
         const bytes_in_range = bytes.items[source / 8 ..][0..read_bytes];
-        var result_bytes: [4]u8 = .{0} ** 4;
+        var result_bytes: [4]u8 = @splat(0);
         @memcpy(result_bytes[0..bytes_in_range.len], bytes_in_range);
-        return bytesToU32(result_bytes);
+        return @bitCast(result_bytes);
     } else {
         const start_mask: u8 = @truncate(@as(u16, 0xff) << bits_end);
         const end_mask: u8 = ~start_mask;
@@ -180,16 +180,16 @@ const SyscallReturn = union(enum) {
 
 fn readSyscallArg(bytes: *const ArrayList(u8), comptime arg_index: u3) u32 {
     const index = @as(u32, arg_index) * 4;
-    return bytesToU32(bytes.items[index..][0..4].*);
+    return @bitCast(bytes.items[index..][0..4].*);
 }
 fn writeSyscallReturn(bytes: *ArrayList(u8), ret: SyscallReturn) void {
     switch (ret) {
         .val => |val| {
-            @memcpy(bytes.items[4..8], &u32ToBytes(val));
+            @memcpy(bytes.items[4..8], &@as([4]u8, @bitCast(@as(u32, val))));
         },
         .err => |err| {
-            const int: u32 = @as(u32, @intFromEnum(err)) | 0x8000_0000;
-            @memcpy(bytes.items[4..8], &u32ToBytes(int));
+            const int = @as(u32, @backingInt(err)) | 0x8000_0000;
+            @memcpy(bytes.items[4..8], &@as([4]u8, @bitCast(int)));
         },
         .none => {},
     }
@@ -207,7 +207,7 @@ pub fn bitcpyImpure(
 
     // this condition guarantees that at least 1 bit was written to the bits in 0x20..0x40
     if (dest < 0x40 and dest + count > 0x20 and count != 0) {
-        const syscall_number: SyscallNumber = @enumFromInt(readSyscallArg(bytes, 1));
+        const syscall_number: SyscallNumber = @fromBackingInt(readSyscallArg(bytes, 1));
         switch (syscall_number) {
             .read => writeSyscallReturn(bytes, doSyscallRead(io, bytes)),
             .write => writeSyscallReturn(bytes, doSyscallWrite(io, bytes)),
@@ -343,43 +343,19 @@ fn ensureLen(gpa: Alloc, bytes: *ArrayList(u8), required_len: usize) Alloc.Error
     }
 }
 
-fn bytesToU32(bytes: [4]u8) u32 {
-    // in future zig versions @bitCast will always convert ints as if they were
-    // little endian, meaning this entire function could be replaced with a @bitCast
-
-    const int = std.mem.bytesToValue(u32, &bytes);
-    return std.mem.toNative(u32, int, .little);
-}
-
-fn u32ToBytes(int: u32) [4]u8 {
-    // in future zig versions @bitCast will always convert ints as if they were
-    // little endian, meaning this entire function could be replaced with a @bitCast
-
-    const little_endian = std.mem.nativeTo(u32, int, .little);
-    return std.mem.toBytes(little_endian);
-}
-
 fn traceCommand(io: Io, source: u32, dest: u32, count: u32) Io.Writer.Error!void {
-    var buffer: [64]u8 = undefined;
-    var file_writer = Io.File.stderr().writer(io, &buffer);
-    const writer = &file_writer.interface;
-
-    try writer.writeAll("running: [");
-    try writeFlippedHexInt(writer, source);
-    try writer.writeAll(", ");
-    try writeFlippedHexInt(writer, dest);
-    try writer.writeAll(", ");
-    try writeFlippedHexInt(writer, count);
-    try writer.writeAll("]\n");
-    try writer.flush();
+    var buffer: [40]u8 = undefined;
+    @memcpy(&buffer, "running: [XXXXXXXX, XXXXXXXX, XXXXXXXX]\n");
+    writeFlippedHexInt(buffer[10..18], source);
+    writeFlippedHexInt(buffer[20..28], dest);
+    writeFlippedHexInt(buffer[30..38], count);
+    Io.File.stderr().writeStreamingAll(io, &buffer) catch return error.WriteFailed;
 }
 
-fn writeFlippedHexInt(writer: *Io.Writer, int: u32) Io.Writer.Error!void {
-    for (u32ToBytes(int)) |byte| {
-        const lower = byte % (1 << 4);
-        const higher = byte >> 4;
-        try writer.print("{x}{x}", .{ lower, higher });
-    }
+fn writeFlippedHexInt(chars: *[8]u8, int: u32) void {
+    const quads: [8]u4 = @bitCast(int);
+    for (chars, quads) |*char, quad|
+        char.* = "0123456789abcdef"[quad];
 }
 
 fn dumpProgramBytes(io: Io, bytes: []const u8) Io.Writer.Error!void {
@@ -389,8 +365,7 @@ fn dumpProgramBytes(io: Io, bytes: []const u8) Io.Writer.Error!void {
 
     try writer.writeAll("\n");
     for (bytes, 0..) |byte, i| {
-        const lower = byte % (1 << 4);
-        const higher = byte >> 4;
+        const lower, const higher = @as([2]u4, @bitCast(byte));
         try writer.print("{x}{x}", .{ lower, higher });
         if (i % 4 == 3)
             try writer.writeAll(if (i % 32 == 31) "\n" else " ");
