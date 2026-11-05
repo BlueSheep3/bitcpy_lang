@@ -280,18 +280,27 @@ pub fn bitcpy(
     dest: u32,
     count: u32,
 ) Alloc.Error!void {
-    try slow_bitcpy(gpa, bytes, source, dest, count);
+    const dif = @abs(@as(i32, @bitCast(source)) - @as(i32, @bitCast(dest)));
+    if (count < 16 or dif % 8 != 0 or dif <= count) {
+        try slow_bitcpy(gpa, bytes, source, dest, count);
+    } else {
+        const first_count: u32 = (8 - (source % 8)) % 8;
+        const a_source = source + first_count;
+        const a_dest = dest + first_count;
+        const a_count = count - count % 8;
+        std.debug.assert(a_source % 8 == 0 and a_dest % 8 == 0 and a_count % 8 == 0);
+        try ensureLen(gpa, bytes, @divCeil((@max(a_source, a_dest) + a_count), 8));
+        // TODO make this read here and write after the memmove, so dif <= count can be removed
+        try slow_bitcpy(gpa, bytes, source, dest, first_count);
+        try slow_bitcpy(gpa, bytes, a_source + a_count, a_dest + a_count, count % 8);
 
-    // TODO handle a LOT of edgecases
-    // - any of the 3 values may not be a multiple of 8
-    // - this may go out of bounds
-    // - if the write is out of bounds, extend the array list
-    // - source and dest may overlap
-    // - the bits being read/written may be at an adress larger than 2^32
-    // @memcpy(
-    //     bytes.items[dest / 8 ..][0 .. count / 8],
-    //     bytes.items[source / 8 ..][0 .. count / 8],
-    // );
+        @memmove(
+            bytes.items[a_dest / 8 ..][0 .. a_count / 8],
+            bytes.items[a_source / 8 ..][0 .. a_count / 8],
+        );
+    }
+
+    // FIXME the bits being read/written may be at an adress larger than 2^32
 }
 
 // the simplest (but also really slow) implementation of bitcpy.
