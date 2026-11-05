@@ -239,16 +239,14 @@ fn doSyscallRead(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
     if (buf % 8 != 0 or len % 8 != 0)
         return .{ .err = .misaligned };
     const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+
     // FIXME file handles are not integers on windows
     const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
-
-    var buffer: [1024]u8 = undefined;
-    var reader = file.reader(io, &buffer);
-    const read_count = reader.interface.readSliceShort(slice) catch
+    const read_count = file.readStreaming(io, &.{slice}) catch
         return .{ .err = .read_failed };
 
     // read_count is at most len, which fits into a u31, so this fits as well
-    return .{ .val = @intCast(read_count) };
+    return .{ .val = @intCast(read_count * 8) };
 }
 
 fn doSyscallWrite(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
@@ -260,14 +258,10 @@ fn doSyscallWrite(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
     if (buf % 8 != 0 or len % 8 != 0)
         return .{ .err = .misaligned };
     const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+
     // FIXME file handles are not integers on windows
     const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
-
-    // is this really the best way to do this write?
-    var buffer: [1024]u8 = undefined;
-    var writer = file.writer(io, &buffer);
-    writer.interface.writeAll(slice) catch return .{ .err = .write_failed };
-    writer.flush() catch return .{ .err = .write_failed };
+    file.writeStreamingAll(io, slice) catch return .{ .err = .write_failed };
 
     return .none;
 }

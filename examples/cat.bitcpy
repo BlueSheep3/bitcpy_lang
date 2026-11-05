@@ -1,0 +1,19 @@
+[ takes stdin as input and gives it to stdout ]
+[ .00000000 ] 0c000000 00000000 00000000 0e300000 80000000 aaaaaaaa
+[ .0c000000 ] 06200000 02000000 04000000 [ read std in ]
+
+[ jump if read input ]
+[ .02100000 ] 32000000 5c100000 10000000 [ copies read bit into the next line length argument ]
+[ .08100000 ] 0c300000 00000000 00000000 [ sets program counter or not depending on the previous line ]
+
+[ .0e100000 ] 04200000 02000000 12000000 [ exit ]
+[ .04200000 ] c3000000 00000000 00000000 [ exit code and read codes ]
+
+[ jump here ]
+[ .0a200000 ] 08300000 02000000 04000000 [ write call ]
+[ .00300000 ] 00400000 00000000 02000000 [ jump to start ]
+
+[ .06300000 ] 00000000 10000000 10000000 [ zeros and write codes ]
+[ .0c300000 ] 04200000 00000000 06000000 [ exit, read byte and reset pointers ]
+
+
