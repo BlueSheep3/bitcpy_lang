@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Alloc = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -49,6 +50,16 @@ pub const RunOptions = struct {
     trace_memory: bool = false,
 };
 
+const Context = struct {
+    fd_associations: switch (builtin.target.os.tag) {
+        .windows => std.AutoHashMapUnmanaged(u32, std.Io.File),
+        else => void,
+    } = switch (builtin.target.os.tag) {
+        .windows => .empty,
+        else => {},
+    },
+};
+
 pub const RunError = error{
     PcOutOfBounds,
 } || Alloc.Error || Io.Writer.Error;
@@ -58,6 +69,16 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
     // this forces all of them to be in bounds, so the main loop
     // doesn't have to ever handle these weird edgecases.
     try ensureLen(gpa, bytes, 256 / 8);
+
+    var ctx: Context = .{};
+    switch (builtin.target.os.tag) {
+        .windows => {
+            try ctx.fd_associations.put(gpa, 0, Io.File.stdin());
+            try ctx.fd_associations.put(gpa, 1, Io.File.stdout());
+            try ctx.fd_associations.put(gpa, 2, Io.File.stderr());
+        },
+        else => {},
+    }
 
     while (true) {
         if (opts.trace_memory)
@@ -79,7 +100,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
         if (opts.trace_command)
             traceCommand(io, source, dest, count) catch {};
 
-        try bitcpyImpure(gpa, io, bytes, source, dest, count);
+        try bitcpyImpure(gpa, ctx, io, bytes, source, dest, count);
 
         const new_pc = @as(u32, @bitCast(bytes.items[0..4].*)) +% 0x60;
         bytes.items[0..4].* = @bitCast(new_pc);
@@ -197,6 +218,7 @@ fn writeSyscallReturn(bytes: *ArrayList(u8), ret: SyscallReturn) void {
 
 pub fn bitcpyImpure(
     gpa: Alloc,
+    ctx: Context,
     io: Io,
     bytes: *ArrayList(u8),
     source: u32,
@@ -209,8 +231,8 @@ pub fn bitcpyImpure(
     if (dest < 0x40 and dest + count > 0x20 and count != 0) {
         const syscall_number: SyscallNumber = @fromBackingInt(readSyscallArg(bytes, 1));
         switch (syscall_number) {
-            .read => writeSyscallReturn(bytes, doSyscallRead(io, bytes)),
-            .write => writeSyscallReturn(bytes, doSyscallWrite(io, bytes)),
+            .read => writeSyscallReturn(bytes, try doSyscallRead(ctx, gpa, io, bytes)),
+            .write => writeSyscallReturn(bytes, doSyscallWrite(ctx, io, bytes)),
             .exit => std.process.exit(bytes.items[8]),
             .dumpmem => {
                 dumpProgramBytes(io, bytes.items) catch
@@ -224,7 +246,7 @@ pub fn bitcpyImpure(
     }
 }
 
-fn doSyscallRead(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
+fn doSyscallRead(ctx: Context, gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
     const fd = readSyscallArg(bytes, 2);
     const buf = readSyscallArg(bytes, 3);
     const raw_len = readSyscallArg(bytes, 4);
@@ -233,15 +255,12 @@ fn doSyscallRead(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
     // limit how many bits you can read here, since read only reads UP TO that many bits anyway
     const len = @min(raw_len, (std.math.maxInt(u31) / 8) * 8);
 
-    // FIXME handle out of bounds
-    // is there any good way to handle OOB besides always
-    // extending memory to fit this entire buffer?
     if (buf % 8 != 0 or len % 8 != 0)
         return .{ .err = .misaligned };
+    try ensureLen(gpa, bytes, buf / 8 + len / 8);
     const slice = bytes.items[buf / 8 ..][0 .. len / 8];
 
-    // FIXME file handles are not integers on windows
-    const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
+    const file: Io.File = fd_to_file(ctx, fd) orelse return .{ .err = .write_failed };
     const read_count = file.readStreaming(io, &.{slice}) catch
         return .{ .err = .read_failed };
 
@@ -249,7 +268,7 @@ fn doSyscallRead(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
     return .{ .val = @intCast(read_count * 8) };
 }
 
-fn doSyscallWrite(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
+fn doSyscallWrite(ctx: Context, io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
     const fd = readSyscallArg(bytes, 2);
     const buf = readSyscallArg(bytes, 3);
     const len = readSyscallArg(bytes, 4);
@@ -259,11 +278,17 @@ fn doSyscallWrite(io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
         return .{ .err = .misaligned };
     const slice = bytes.items[buf / 8 ..][0 .. len / 8];
 
-    // FIXME file handles are not integers on windows
-    const file: Io.File = .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } };
+    const file: Io.File = fd_to_file(ctx, fd) orelse return .{ .err = .write_failed };
     file.writeStreamingAll(io, slice) catch return .{ .err = .write_failed };
 
     return .none;
+}
+
+fn fd_to_file(ctx: Context, fd: u32) ?Io.File {
+    return switch (builtin.target.os.tag) {
+        .windows => ctx.fd_associations.get(fd),
+        else => .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } },
+    };
 }
 
 // this is the pure version of bitcpyImpure, meaning it will never perform syscalls.
@@ -297,6 +322,7 @@ pub fn bitcpy(
     // FIXME the bits being read/written may be at an adress larger than 2^32
 }
 
+// TODO replace this entirely
 // the simplest (but also really slow) implementation of bitcpy.
 // you may use this to test whether the actual bitcpy implementation is correct.
 fn slow_bitcpy(
