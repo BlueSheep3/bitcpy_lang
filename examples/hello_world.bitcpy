@@ -1,6 +1,6 @@
 [ prints "Hello World!\n" to stdout and exits with a status of 0 ]
-[ .00000000 ] 80100000 00000000 10000000 0a000000 86000000
-[ .0a000000 ] 8456c6c6 f60275f6 27c64612 a0
-[ .80100000 ] 01100000 02000000 10000000
-[ .86100000 ] 8c100000 02000000 12000000
-[ .8c100000 ] c3000000 0
+[ .00000000 ] 80100000 00000000 10000000 0a000000 86000000 [ syscall args setup for first write]
+[ .0a000000 ] 8456c6c6 f60275f6 27c64612 a0 [ "Hello World!\n" string ]
+[ .80100000 ] 01100000 02000000 10000000 [ write a 1 into arg1 to do a write syscall ]
+[ .86100000 ] 8c100000 02000000 12000000 [ write c3 into arg1 and 0 into arg2 to exit with 0 ]
+[ .8c100000 ] c3000000 00 [ syscall number of exit and extra 0 bit to overwrite arg2 ]

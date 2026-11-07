@@ -65,6 +65,7 @@ fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
             return .exit;
         } else if (isArg(arg, "-v", "--version")) {
             try print(io, .stdout(), "bitcpy_lang 0.0.0\n", .{});
+            return .exit;
         } else if (isArg(arg, "-xc", "--tracecmd")) {
             trace_command = true;
         } else if (isArg(arg, "-xm", "--tracemem")) {
