@@ -1,10 +1,12 @@
 [ creates "Hello World!" as a file and closes it ]
-[ .00000000 ] 00100000 00000000 10000000 0a000000 86000000 [ syscall args setup for first write]
+[ .00000000 ] 00100000 00000000 10000000 aaaaaaaa f0000000 [ syscall args ]
 [ .0a000000 ] 8456c6c6 f60275f6 27c64612 [ "Hello World!" string ]
-[ .00100000 ] 0e200000 02000000 06000000 [ open the hello world file ]
-[ .06100000 ] 02000000 04000000 02000000
-[ .0c100000 ] 04300000 02000000 02000000
-[ .02200000 ] 08200000 02000000 04000000 [ write c3 into arg1 and 0 into arg2 to exit with 0 ]
-[ .08200000 ] c3000000 00000000 00000000 [ syscall number of exit and extra 0 bit to overwrite arg2 ]
-[ .0e200000 ] 20000000 0a000000 06000000
-[ .04300000 ] 30000000
+[ .00100000 ] 04300000 02000000 06000000 [ open the hello world file ]
+[ .06100000 ] 02000000 0c300000 02000000 [ move the file identifier ]
+[ .0c100000 ] 0a300000 02000000 08000000 [ write into the file ]
+[ .02200000 ] 02400000 02000000 02000000 [ close the file ]
+[ .08200000 ] 0e200000 02000000 04000000 [ write c3 into arg1 and 0 into arg2 to exit with 0 ]
+[ .0e200000 ] c3000000 00000000 00000000 [ syscall number of exit and extra 0 to overwrite arg2 ]
+[ .04300000 ] 20000000 0a000000 82000000 [ syscall number of open and pointer and buf to data ]
+[ .0a300000 ] 10000000 aaaaaaaa 0a000000 06000000 [ syscall number of write and fd, pointer and buf to data ]
+[ .02400000 ] 30000000 [ syscall to close the file missing fd ]

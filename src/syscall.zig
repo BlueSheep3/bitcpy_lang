@@ -74,6 +74,8 @@ pub const SyscallError = enum(u16) {
     /// For example: the file did not give you permissions to open it.
     open_failed = 0x12,
 
+    invalid_open_options = 0x13,
+
     _,
 };
 
@@ -197,6 +199,17 @@ fn fd_to_file(ctx: Context, fd: u32) ?Io.File {
 fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
     const buf = readSyscallArg(bytes, 2);
     const len = readSyscallArg(bytes, 3);
+    const flags = readSyscallArg(bytes, 4);
+
+    const FileFlags = packed struct(u32) {
+        read: bool = false,
+        write: bool = false,
+        create: bool = false,
+        truncate: bool = false,
+        unused: u28 = 0,
+    };
+    const f: FileFlags = @bitCast(flags);
+    if (f.unused != 0) return .{ .err = .invalid_open_options };
 
     // FIXME handle out of bounds
     if (buf % 8 != 0 or len % 8 != 0)
@@ -204,8 +217,23 @@ fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *const ArrayList(u8)) 
     const slice = bytes.items[buf / 8 ..][0 .. len / 8];
 
     const cwd = std.Io.Dir.cwd();
-    const file: Io.File = cwd.createFile(io, slice, .{ .truncate = false }) catch
-        return .{ .err = .open_failed };
+    var file: Io.File = undefined;
+    if (f.create) {
+        if (!f.write) return .{ .err = .invalid_open_options };
+        file = cwd.createFile(io, slice, .{ .read = f.read, .truncate = f.truncate }) catch
+            return .{ .err = .open_failed };
+    } else {
+        const read_write = @intFromBool(f.read) | @as(u2, @intFromBool(f.write)) << 1;
+        const mode: std.Io.Dir.OpenFileOptions.Mode =
+            switch (read_write) {
+                0b00 => return .{ .err = .invalid_open_options },
+                0b01 => .read_only,
+                0b10 => .write_only,
+                0b11 => .read_write,
+            };
+        file = cwd.openFile(io, slice, .{ .mode = mode }) catch
+            return .{ .err = .open_failed };
+    }
 
     switch (builtin.target.os.tag) {
         .windows => {
