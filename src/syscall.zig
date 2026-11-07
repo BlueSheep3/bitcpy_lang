@@ -121,7 +121,7 @@ pub const Context = struct {
     pub fn default(gpa: Alloc) Alloc.Error!Context {
         switch (builtin.target.os.tag) {
             .windows => {
-                var fds: std.AutoArrayHashMapUnmanaged(u32, Io.File) = .empty;
+                var fds: std.AutoHashMapUnmanaged(u32, Io.File) = .empty;
                 errdefer fds.deinit(gpa);
                 try fds.put(gpa, 0, .stdin());
                 try fds.put(gpa, 1, .stdout());
@@ -150,13 +150,13 @@ fn writeSyscallReturn(bytes: *ArrayList(u8), ret: SyscallReturn) void {
     }
 }
 
-pub fn doSyscallAtArg1(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) Alloc.Error!void {
+pub fn doSyscallAtArg1(gpa: Alloc, io: Io, ctx: *Context, bytes: *ArrayList(u8)) Alloc.Error!void {
     const syscall_number: SyscallNumber = @fromBackingInt(readSyscallArg(bytes, 1));
     switch (syscall_number) {
-        .read => writeSyscallReturn(bytes, try doSyscallRead(gpa, io, ctx, bytes)),
-        .write => writeSyscallReturn(bytes, try doSyscallWrite(gpa, io, ctx, bytes)),
+        .read => writeSyscallReturn(bytes, try doSyscallRead(gpa, io, ctx.*, bytes)),
+        .write => writeSyscallReturn(bytes, try doSyscallWrite(gpa, io, ctx.*, bytes)),
         .open => writeSyscallReturn(bytes, try doSyscallOpen(ctx, gpa, io, bytes)),
-        .close => writeSyscallReturn(bytes, doSyscallClose(ctx, io, bytes)),
+        .close => writeSyscallReturn(bytes, doSyscallClose(ctx.*, io, bytes)),
         .time => writeSyscallReturn(bytes, try doSyscallTime(gpa, io, bytes)),
         .sleep => writeSyscallReturn(bytes, try doSyscallSleep(gpa, io, bytes)),
         .random => writeSyscallReturn(bytes, try doSyscallRandom(gpa, io, bytes)),
@@ -212,7 +212,7 @@ fn fd_to_file(ctx: Context, fd: u32) ?Io.File {
     };
 }
 
-fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
+fn doSyscallOpen(ctx: *Context, gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
     const buf = readSyscallArg(bytes, 2);
     const len = readSyscallArg(bytes, 3);
     const flags = readSyscallArg(bytes, 4);
@@ -251,8 +251,8 @@ fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.
     switch (builtin.target.os.tag) {
         .windows => {
             ctx.max_fds += 1;
-            ctx.fd_associations.put(gpa, ctx.max_fds, file);
-            return .{ .val = @intCast(ctx.fd.max_fds) };
+            try ctx.fd_associations.put(gpa, ctx.max_fds, file);
+            return .{ .val = @intCast(ctx.max_fds) };
         },
         else => return .{ .val = @intCast(file.handle) },
     }

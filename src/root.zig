@@ -63,7 +63,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
     // doesn't have to ever handle these weird edgecases.
     try ensureLen(gpa, bytes, 0x100);
 
-    const ctx: Context = try .default(gpa);
+    var ctx: Context = try .default(gpa);
 
     while (true) {
         if (opts.trace_memory)
@@ -85,7 +85,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
         if (opts.trace_command)
             traceCommand(io, source, dest, count) catch {};
 
-        try bitcpyImpure(gpa, io, ctx, bytes, source, dest, count);
+        try bitcpyImpure(gpa, io, &ctx, bytes, source, dest, count);
 
         const new_pc = @as(u32, @bitCast(bytes.items[0..4].*)) +% 0x60;
         bytes.items[0..4].* = @bitCast(new_pc);
@@ -120,7 +120,7 @@ fn readU32(bytes: *const ArrayList(u8), source: u32) u32 {
 pub fn bitcpyImpure(
     gpa: Alloc,
     io: Io,
-    ctx: Context,
+    ctx: *Context,
     bytes: *ArrayList(u8),
     source: u32,
     dest: u32,
