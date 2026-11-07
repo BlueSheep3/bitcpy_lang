@@ -41,6 +41,26 @@ pub const SyscallNumber = enum(u32) {
     /// Closes a file.
     close = 0x03,
 
+    /// Sleeps for the given time in nanoseconds.
+    /// The time is given by the first 3 * 0x20 bits starting at `arg2`
+    ///
+    /// # Errors
+    /// - `misaligned` if `arg2` is misaligned.
+    sleep = 0x23,
+
+    /// Gets the current time in nanoseconds.
+    /// Writes the current time as 3 * 0x20 bits starting at adress `arg2`.
+    ///
+    /// # Errors
+    /// - `misaligned` if `arg2` is misaligned.
+    time = 0xe4,
+
+    /// Writes cryptographically random data into the first `arg3` bits starting at adress `arg2`
+    ///
+    /// # Errors
+    /// - `misaligned` if `arg2` is misaligned.
+    random = 0x13e,
+
     /// Exits the program with exit status `arg2`.
     ///
     /// The exit status will be truncated to fit into a `u8`.
@@ -134,9 +154,12 @@ pub fn doSyscallAtArg1(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) 
     const syscall_number: SyscallNumber = @fromBackingInt(readSyscallArg(bytes, 1));
     switch (syscall_number) {
         .read => writeSyscallReturn(bytes, try doSyscallRead(gpa, io, ctx, bytes)),
-        .write => writeSyscallReturn(bytes, doSyscallWrite(io, ctx, bytes)),
-        .open => writeSyscallReturn(bytes, doSyscallOpen(ctx, gpa, io, bytes)),
+        .write => writeSyscallReturn(bytes, try doSyscallWrite(gpa, io, ctx, bytes)),
+        .open => writeSyscallReturn(bytes, try doSyscallOpen(ctx, gpa, io, bytes)),
         .close => writeSyscallReturn(bytes, doSyscallClose(ctx, io, bytes)),
+        .time => writeSyscallReturn(bytes, try doSyscallTime(gpa, io, bytes)),
+        .sleep => writeSyscallReturn(bytes, try doSyscallSleep(gpa, io, bytes)),
+        .random => writeSyscallReturn(bytes, try doSyscallRandom(gpa, io, bytes)),
         .exit => std.process.exit(bytes.items[8]),
         .dumpmem => {
             root.dumpProgramBytes(io, bytes.items) catch
@@ -160,10 +183,7 @@ fn doSyscallRead(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) Alloc.
     // limit how many bits you can read here, since read only reads UP TO that many bits anyway
     const len = @min(raw_len, (std.math.maxInt(u31) / 8) * 8);
 
-    if (buf % 8 != 0 or len % 8 != 0)
-        return .{ .err = .misaligned };
-    try root.ensureLen(gpa, bytes, buf + len);
-    const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+    const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
 
     const file: Io.File = fd_to_file(ctx, fd) orelse return .{ .err = .write_failed };
     const read_count = file.readStreaming(io, &.{slice}) catch
@@ -173,15 +193,11 @@ fn doSyscallRead(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) Alloc.
     return .{ .val = @intCast(read_count * 8) };
 }
 
-fn doSyscallWrite(io: Io, ctx: Context, bytes: *const ArrayList(u8)) SyscallReturn {
+fn doSyscallWrite(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
     const fd = readSyscallArg(bytes, 2);
     const buf = readSyscallArg(bytes, 3);
     const len = readSyscallArg(bytes, 4);
-
-    // FIXME handle out of bounds
-    if (buf % 8 != 0 or len % 8 != 0)
-        return .{ .err = .misaligned };
-    const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+    const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
 
     const file: Io.File = fd_to_file(ctx, fd) orelse return .{ .err = .write_failed };
     file.writeStreamingAll(io, slice) catch return .{ .err = .write_failed };
@@ -196,7 +212,7 @@ fn fd_to_file(ctx: Context, fd: u32) ?Io.File {
     };
 }
 
-fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
+fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
     const buf = readSyscallArg(bytes, 2);
     const len = readSyscallArg(bytes, 3);
     const flags = readSyscallArg(bytes, 4);
@@ -211,10 +227,7 @@ fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *const ArrayList(u8)) 
     const f: FileFlags = @bitCast(flags);
     if (f.unused != 0) return .{ .err = .invalid_open_options };
 
-    // FIXME handle out of bounds
-    if (buf % 8 != 0 or len % 8 != 0)
-        return .{ .err = .misaligned };
-    const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+    const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
 
     const cwd = std.Io.Dir.cwd();
     var file: Io.File = undefined;
@@ -252,4 +265,40 @@ fn doSyscallClose(ctx: Context, io: Io, bytes: *const ArrayList(u8)) SyscallRetu
     file.close(io);
 
     return .none;
+}
+
+fn doSyscallTime(gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
+    const buf = readSyscallArg(bytes, 2);
+    const len = 3 * 0x20;
+    const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
+
+    const time = Io.Timestamp.now(io, .real);
+    @memcpy(slice, &@as([len / 8]u8, @bitCast(time.nanoseconds)));
+    return .none;
+}
+
+fn doSyscallSleep(gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
+    const buf = readSyscallArg(bytes, 2);
+    const len = 3 * 0x20;
+    const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
+
+    const duration: Io.Duration = .fromNanoseconds(@bitCast(slice[0 .. len / 8].*));
+    io.sleep(duration, .real) catch unreachable;
+    return .none;
+}
+
+fn doSyscallRandom(gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
+    const buf = readSyscallArg(bytes, 2);
+    const len = readSyscallArg(bytes, 3);
+    const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
+
+    io.random(slice);
+    return .none;
+}
+
+fn getAlignedSlice(gpa: Alloc, bytes: *ArrayList(u8), buf: u32, len: u32) Alloc.Error!?[]u8 {
+    if (buf % 8 != 0 or len % 8 != 0)
+        return null;
+    try root.ensureLen(gpa, bytes, buf + len);
+    return bytes.items[buf / 8 ..][0 .. len / 8];
 }
