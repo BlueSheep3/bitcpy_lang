@@ -91,7 +91,8 @@ it means that an error occurred. The least significant `0x10` bits represent the
 Syscalls will always be done after doing the regular bitcpy instruction,
 but before incrementing the program counter.
 
-For all the details of specific syscalls, see the `SyscallNumber` type in [root.zig](src/root.zig).
+For all the details of specific syscalls, see the `SyscallNumber` type
+in [syscall.zig](src/syscall.zig).
 
 The most important syscalls for a simple program are `read`, `write`, and `exit`.
 With them, you can read from file descriptor `0` to read from `stdin`
