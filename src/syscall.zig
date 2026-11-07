@@ -30,6 +30,17 @@ pub const SyscallNumber = enum(u32) {
     /// - `write_failed` if the write fails for any reason.
     write = 0x01,
 
+    /// Creates or opens a file with write access.
+    /// takes the first `arg4` bits starting at adress `arg3` as a string to which file should be opened.
+    ///
+    /// # Errors
+    /// - `misaligned` if `arg3` or `arg4` are misaligned.
+    /// - `open_failed` if the open fails for any reason.
+    open = 0x02,
+
+    /// Closes a file.
+    close = 0x03,
+
     /// Exits the program with exit status `arg2`.
     ///
     /// The exit status will be truncated to fit into a `u8`.
@@ -59,6 +70,9 @@ pub const SyscallError = enum(u16) {
     /// A write failed for some reason.
     /// For example: the file descriptor wasn't open, you didn't have write permissions, etc...
     write_failed = 0x11,
+    /// Opening the file failed for some reason.
+    /// For example: the file did not give you permissions to open it.
+    open_failed = 0x12,
 
     _,
 };
@@ -77,21 +91,23 @@ pub const Context = struct {
         .windows => std.AutoHashMapUnmanaged(u32, Io.File),
         else => void,
     },
+    max_fds: switch (builtin.target.os.tag) {
+        .windows => u32,
+        else => void,
+    },
 
     pub fn default(gpa: Alloc) Alloc.Error!Context {
-        return .{
-            .fd_associations = switch (builtin.target.os.tag) {
-                .windows => block: {
-                    var fds: std.AutoArrayHashMapUnmanaged(u32, Io.File) = .empty;
-                    errdefer fds.deinit(gpa);
-                    try fds.put(gpa, 0, .stdin());
-                    try fds.put(gpa, 1, .stdout());
-                    try fds.put(gpa, 2, .stderr());
-                    break :block fds;
-                },
-                else => {},
+        switch (builtin.target.os.tag) {
+            .windows => {
+                var fds: std.AutoArrayHashMapUnmanaged(u32, Io.File) = .empty;
+                errdefer fds.deinit(gpa);
+                try fds.put(gpa, 0, .stdin());
+                try fds.put(gpa, 1, .stdout());
+                try fds.put(gpa, 2, .stderr());
+                return .{ .fd_associations = fds, .max_fds = 2 };
             },
-        };
+            else => return .{ .fd_associations = {}, .max_fds = {} },
+        }
     }
 };
 
@@ -117,6 +133,8 @@ pub fn doSyscallAtArg1(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) 
     switch (syscall_number) {
         .read => writeSyscallReturn(bytes, try doSyscallRead(gpa, io, ctx, bytes)),
         .write => writeSyscallReturn(bytes, doSyscallWrite(io, ctx, bytes)),
+        .open => writeSyscallReturn(bytes, doSyscallOpen(ctx, gpa, io, bytes)),
+        .close => writeSyscallReturn(bytes, doSyscallClose(ctx, io, bytes)),
         .exit => std.process.exit(bytes.items[8]),
         .dumpmem => {
             root.dumpProgramBytes(io, bytes.items) catch
@@ -174,4 +192,36 @@ fn fd_to_file(ctx: Context, fd: u32) ?Io.File {
         .windows => ctx.fd_associations.get(fd),
         else => .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } },
     };
+}
+
+fn doSyscallOpen(ctx: Context, gpa: Alloc, io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
+    const buf = readSyscallArg(bytes, 2);
+    const len = readSyscallArg(bytes, 3);
+
+    // FIXME handle out of bounds
+    if (buf % 8 != 0 or len % 8 != 0)
+        return .{ .err = .misaligned };
+    const slice = bytes.items[buf / 8 ..][0 .. len / 8];
+
+    const cwd = std.Io.Dir.cwd();
+    const file: Io.File = cwd.createFile(io, slice, .{ .truncate = false }) catch
+        return .{ .err = .open_failed };
+
+    switch (builtin.target.os.tag) {
+        .windows => {
+            ctx.max_fds += 1;
+            ctx.fd_associations.put(gpa, ctx.max_fds, file);
+            return .{ .val = @intCast(ctx.fd.max_fds) };
+        },
+        else => return .{ .val = @intCast(file.handle) },
+    }
+}
+
+fn doSyscallClose(ctx: Context, io: Io, bytes: *const ArrayList(u8)) SyscallReturn {
+    const fd = readSyscallArg(bytes, 2);
+
+    const file: Io.File = fd_to_file(ctx, fd) orelse return .{ .err = .write_failed };
+    file.close(io);
+
+    return .none;
 }
