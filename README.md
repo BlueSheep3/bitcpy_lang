@@ -54,6 +54,8 @@ the comment will end after the first `]`, not the second one.
 
 All whitespace is ignored.
 
+If the very first line of the program is a shebang, it will be ignored.
+
 
 ## Basic execution
 

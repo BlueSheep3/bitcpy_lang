@@ -1,3 +1,5 @@
+#!/usr/bin/env bitcpy
+
 [ prints "Hello World!\n" to stdout and exits with a status of 0 ]
 [ .00000000 ] 80100000 00000000 10000000 0a000000 86000000 [ syscall args setup for first write]
 [ .0a000000 ] 8456c6c6 f60275f6 27c64612 a0 [ "Hello World!\n" string ]

@@ -1,3 +1,5 @@
+#!/usr/bin/env bitcpy
+
 [ PC and filler values for syscall stuff ]
 [ .00000000 ] 04700000 aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa
 

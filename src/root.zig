@@ -18,7 +18,11 @@ pub fn parseCode(gpa: Alloc, code: []const u8) ParseError!ArrayList(u8) {
     var is_misaligned = false;
     var is_comment = false;
 
-    for (code) |c| {
+    var start_index: usize = 0;
+    if (std.mem.startsWith(u8, code, "#!"))
+        start_index = std.mem.findScalar(u8, code, '\n') orelse code.len;
+
+    for (code[start_index..]) |c| {
         if (is_comment) {
             if (c == ']')
                 is_comment = false;

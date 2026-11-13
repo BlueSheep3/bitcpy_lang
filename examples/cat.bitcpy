@@ -1,3 +1,5 @@
+#!/usr/bin/env bitcpy
+
 [ takes stdin as input and gives it to stdout ]
 [ .00000000 ] 0c000000 00000000 00000000 0e300000 80000000 aaaaaaaa
 [ .0c000000 ] 06200000 02000000 04000000 [ read std in ]
