@@ -109,6 +109,8 @@ pub const SyscallReturn = union(enum) {
 };
 
 pub const Context = struct {
+    opts: root.RunOptions,
+
     fd_associations: switch (builtin.target.os.tag) {
         .windows => std.AutoHashMapUnmanaged(u32, Io.File),
         else => void,
@@ -118,7 +120,7 @@ pub const Context = struct {
         else => void,
     },
 
-    pub fn default(gpa: Alloc) Alloc.Error!Context {
+    pub fn new(gpa: Alloc, opts: root.RunOptions) Alloc.Error!Context {
         switch (builtin.target.os.tag) {
             .windows => {
                 var fds: std.AutoHashMapUnmanaged(u32, Io.File) = .empty;
@@ -126,9 +128,9 @@ pub const Context = struct {
                 try fds.put(gpa, 0, .stdin());
                 try fds.put(gpa, 1, .stdout());
                 try fds.put(gpa, 2, .stderr());
-                return .{ .fd_associations = fds, .max_fds = 2 };
+                return .{ .opts = opts, .fd_associations = fds, .max_fds = 2 };
             },
-            else => return .{ .fd_associations = {}, .max_fds = {} },
+            else => return .{ .opts = opts, .fd_associations = {}, .max_fds = {} },
         }
     }
 };
@@ -152,18 +154,22 @@ fn writeSyscallReturn(bytes: *ArrayList(u8), ret: SyscallReturn) void {
 
 pub fn doSyscallAtArg1(gpa: Alloc, io: Io, ctx: *Context, bytes: *ArrayList(u8)) Alloc.Error!void {
     const syscall_number: SyscallNumber = @fromBackingInt(readSyscallArg(bytes, 1));
-    switch (syscall_number) {
-        .read => writeSyscallReturn(bytes, try doSyscallRead(gpa, io, ctx.*, bytes)),
-        .write => writeSyscallReturn(bytes, try doSyscallWrite(gpa, io, ctx.*, bytes)),
-        .open => writeSyscallReturn(bytes, try doSyscallOpen(ctx, gpa, io, bytes)),
-        .close => writeSyscallReturn(bytes, doSyscallClose(ctx.*, io, bytes)),
-        .time => writeSyscallReturn(bytes, try doSyscallTime(gpa, io, bytes)),
-        .sleep => writeSyscallReturn(bytes, try doSyscallSleep(gpa, io, bytes)),
-        .random => writeSyscallReturn(bytes, try doSyscallRandom(gpa, io, bytes)),
+    if (ctx.opts.trace_syscall)
+        traceSyscall(io, bytes, syscall_number) catch {};
+
+    const return_value: SyscallReturn = switch (syscall_number) {
+        .read => try doSyscallRead(gpa, io, ctx.*, bytes),
+        .write => try doSyscallWrite(gpa, io, ctx.*, bytes),
+        .open => try doSyscallOpen(ctx, gpa, io, bytes),
+        .close => doSyscallClose(ctx.*, io, bytes),
+        .time => try doSyscallTime(gpa, io, bytes),
+        .sleep => try doSyscallSleep(gpa, io, bytes),
+        .random => try doSyscallRandom(gpa, io, bytes),
         .exit => std.process.exit(bytes.items[8]),
-        .dumpmem => {
+        .dumpmem => d: {
             root.dumpProgramBytes(io, bytes.items) catch
-                writeSyscallReturn(bytes, .{ .err = .write_failed });
+                break :d .{ .err = .write_failed };
+            break :d .none;
         },
         _ => {
             var int: [8]u8 = undefined;
@@ -171,6 +177,59 @@ pub fn doSyscallAtArg1(gpa: Alloc, io: Io, ctx: *Context, bytes: *ArrayList(u8))
             std.log.err("unknown syscall number {s}", .{int});
             std.process.exit(3);
         },
+    };
+
+    if (ctx.opts.trace_syscall)
+        traceSyscallReturn(io, syscall_number, return_value) catch {};
+    writeSyscallReturn(bytes, return_value);
+}
+
+pub fn traceSyscall(io: Io, bytes: *const ArrayList(u8), syscall: SyscallNumber) Io.Writer.Error!void {
+    var buffer: [1 << 8]u8 = undefined;
+    var writer = Io.File.stderr().writer(io, &buffer);
+
+    try writer.interface.writeAll("syscall: ");
+    try writeNonExhaustiveEnum(&writer.interface, syscall);
+
+    var args: [61]u8 = undefined;
+    @memcpy(&args, "(XXXXXXXX, XXXXXXXX, XXXXXXXX, XXXXXXXX, XXXXXXXX, XXXXXXXX)\n");
+    inline for (0..6) |i|
+        root.writeFlippedHexInt(args[1 + i * 10 ..][0..8], readSyscallArg(bytes, i + 2));
+    try writer.interface.writeAll(&args);
+
+    try writer.interface.flush();
+}
+
+pub fn traceSyscallReturn(io: Io, syscall: SyscallNumber, ret: SyscallReturn) Io.Writer.Error!void {
+    var buffer: [1 << 7]u8 = undefined;
+    var writer = Io.File.stderr().writer(io, &buffer);
+
+    try writeNonExhaustiveEnum(&writer.interface, syscall);
+    try writer.interface.writeAll(" returned: ");
+    switch (ret) {
+        .val => |val| {
+            var number: [8]u8 = undefined;
+            root.writeFlippedHexInt(&number, val);
+            try writer.interface.print("value({s})\n", .{number});
+        },
+        .err => |err| {
+            try writer.interface.writeAll("error(");
+            try writeNonExhaustiveEnum(&writer.interface, err);
+            try writer.interface.writeAll(")\n");
+        },
+        .none => try writer.interface.writeAll("none\n"),
+    }
+    try writer.interface.flush();
+}
+
+fn writeNonExhaustiveEnum(writer: *Io.Writer, value: anytype) Io.Writer.Error!void {
+    switch (value) {
+        _ => {
+            var number: [8]u8 = undefined;
+            root.writeFlippedHexInt(&number, @backingInt(value));
+            try writer.print("{s}", .{number});
+        },
+        else => try writer.print("{t}", .{value}),
     }
 }
 

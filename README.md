@@ -28,9 +28,10 @@ bitcpy examples/hello_world.bitcpy
 ```
 
 To debug a bitcpy program, it can be helpful to display what instructions
-are being ran and what the state of the memory looks like:
+are being ran, what the state of the memory looks like,
+and what syscalls are being ran:
 ```bash
-bitcpy --tracecmd --tracemem examples/hello_world.bitcpy
+bitcpy --tracecmd --tracemem --tracesys examples/hello_world.bitcpy
 ```
 
 

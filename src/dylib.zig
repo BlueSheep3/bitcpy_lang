@@ -28,7 +28,8 @@ pub export fn parseCode(code_ptr: [*]const u8, code_len: usize) ExternSliceU8 {
 pub const RunOptions = packed struct(u8) {
     trace_command: bool = false,
     trace_memory: bool = false,
-    _: u6 = 0,
+    trace_syscall: bool = false,
+    _: u5 = 0,
 };
 
 /// This function only returns if an error occured.
@@ -43,6 +44,7 @@ pub export fn runProgram(bytes_ptr: [*]const u8, bytes_len: usize, opts: RunOpti
     const run_opts: bitcpy_lang.RunOptions = .{
         .trace_command = opts.trace_command,
         .trace_memory = opts.trace_memory,
+        .trace_syscall = opts.trace_syscall,
     };
     bitcpy_lang.runProgram(gpa, io.io(), &bytes, run_opts) catch return;
 }

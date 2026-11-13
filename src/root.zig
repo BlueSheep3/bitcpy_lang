@@ -55,6 +55,7 @@ fn push4Bits(gpa: Alloc, bits: u4, bytes: *ArrayList(u8), is_misaligned: *bool) 
 pub const RunOptions = struct {
     trace_command: bool = false,
     trace_memory: bool = false,
+    trace_syscall: bool = false,
 };
 
 pub const RunError = error{
@@ -67,7 +68,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
     // doesn't have to ever handle these weird edgecases.
     try ensureLen(gpa, bytes, 0x100);
 
-    var ctx: Context = try .default(gpa);
+    var ctx: Context = try .new(gpa, opts);
 
     while (true) {
         if (opts.trace_memory)

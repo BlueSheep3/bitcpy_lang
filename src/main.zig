@@ -9,18 +9,16 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const parsed = try parseArgs(args, init.io);
     switch (parsed) {
-        .exit => return,
+        .help => try printHelp(init.io),
+        .version => try print(init.io, .stdout(), "bitcpy_lang 0.0.0\n", .{}),
         .run => |r| {
-            const code = try readFile(r.filename, init.gpa, init.io);
-            defer init.gpa.free(code);
-            var bytes = try bitcpy_lang.parseCode(init.gpa, code);
-            defer bytes.deinit(init.gpa);
-
-            const opts: bitcpy_lang.RunOptions = .{
-                .trace_command = r.trace_command,
-                .trace_memory = r.trace_memory,
+            var bytes = b: {
+                const code = try readFile(r.filename, init.gpa, init.io);
+                defer init.gpa.free(code);
+                break :b try bitcpy_lang.parseCode(init.gpa, code);
             };
-            try bitcpy_lang.runProgram(init.gpa, init.io, &bytes, opts);
+            defer bytes.deinit(init.gpa);
+            try bitcpy_lang.runProgram(init.gpa, init.io, &bytes, r.opts);
         },
     }
 }
@@ -35,18 +33,17 @@ fn readFile(filename: []const u8, gpa: Alloc, io: Io) ![]u8 {
 }
 
 const ParseArgsResult = union(enum) {
-    exit,
+    help,
+    version,
     run: struct {
         filename: []const u8,
         extraargs: []const []const u8,
-        trace_command: bool,
-        trace_memory: bool,
+        opts: bitcpy_lang.RunOptions,
     },
 };
 
 fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
-    var trace_command = false;
-    var trace_memory = false;
+    var opts: bitcpy_lang.RunOptions = .{};
 
     var i: usize = 1; // skip the path of the interpreter
     while (i < args.len) : (i += 1) {
@@ -61,15 +58,15 @@ fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
         }
 
         if (isArg(arg, "-h", "--help")) {
-            try printHelp(io);
-            return .exit;
+            return .help;
         } else if (isArg(arg, "-v", "--version")) {
-            try print(io, .stdout(), "bitcpy_lang 0.0.0\n", .{});
-            return .exit;
+            return .version;
         } else if (isArg(arg, "-xc", "--tracecmd")) {
-            trace_command = true;
+            opts.trace_command = true;
         } else if (isArg(arg, "-xm", "--tracemem")) {
-            trace_memory = true;
+            opts.trace_memory = true;
+        } else if (isArg(arg, "-xs", "--tracesys")) {
+            opts.trace_syscall = true;
         } else {
             try print(io, .stderr(), "unknown argument: {s}\n", .{arg});
             return error.UnknownArgument;
@@ -83,8 +80,7 @@ fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
     return .{ .run = .{
         .filename = args[i],
         .extraargs = args[i + 1 ..],
-        .trace_command = trace_command,
-        .trace_memory = trace_memory,
+        .opts = opts,
     } };
 }
 
@@ -108,6 +104,7 @@ fn printHelp(io: Io) !void {
         \\  -v, --version    print out version information and exit
         \\  -xc, --tracecmd  print each command before executing it
         \\  -xm, --tracemem  dump memory to stderr before each command
+        \\  -xs, --tracesys  print each syscall before doing it
         \\  --               force the argument after this to be interpreted as the filename
         \\
     , .{});
