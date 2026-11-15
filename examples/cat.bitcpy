@@ -1,21 +1,27 @@
 #!/usr/bin/env bitcpy
 
-[ takes stdin as input and gives it to stdout ]
-[ .00000000 ] 0c000000 00000000 00000000 0e300000 80000000 aaaaaaaa
-[ .0c000000 ] 06200000 02000000 04000000 [ read std in ]
+[
+  In a loop, reads 1 byte from stdin and then writes the same byte to stdout.
+  If the read fails, exits with exit code 0. Ignores write errors.
 
-[ jump if read input ]
-[ .02100000 ] 32000000 5c100000 10000000 [ copies read bit into the next line length argument ]
-[ .08100000 ] 0c300000 00000000 00000000 [ sets program counter or not depending on the previous line ]
+  The intent is that, when the stream ends, the `end_of_stream` error
+  will be returned from the read syscall, meaning we are done reading.
+  However, this will also exit successfully if a different error occurs.
+]
 
-[ .0e100000 ] 04200000 02000000 12000000 [ exit ]
-[ .04200000 ] c3000000 00000000 00000000 [ exit code and read codes ]
+[ .00000000 ] 02200000 00000000 00000000 0a000000 80000000
 
-[ jump here ]
-[ .0a200000 ] 08300000 02000000 04000000 [ write call ]
-[ .00300000 ] 00400000 00000000 02000000 [ jump to start ]
+[ data ]
+[ .0a000000 ] 00000000 [ buffer to read/write (only first byte is used) ]
+[ .0c000000 ] 00000000 00000000 [ read syscall number and stdin fd ]
+[ .00100000 ] 10000000 10000000 [ write syscall number and stdout fd ]
+[ .04100000 ] c3000000 00000000 [ exit syscall number and exit code 0 ]
+[ .08100000 ] 06100000 0e200000 [ jump locations   0: loop start  1: exit ]
 
-[ .06300000 ] 00000000 10000000 10000000 [ zeros and write codes ]
-[ .0c300000 ] 04200000 00000000 06000000 [ exit, read byte and reset pointers ]
-
-
+[ main function ]
+[ the program will start at the second instruction ]
+[ .0c100000 ] 00100000 02000000 04000000 [ write to stdout ]
+[ .02200000 ] 0c000000 02000000 04000000 [ read from stdin ]
+[ .08200000 ] f3000000 5e200000 10000000 [ set source of next instruction to error bit of read ]
+[ .0e200000 ] 08100000 00000000 02000000 [ jump to loop start or exit based on error bit ]
+[ .04300000 ] 04100000 02000000 04000000 [ exit ]

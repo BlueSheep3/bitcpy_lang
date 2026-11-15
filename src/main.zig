@@ -7,13 +7,13 @@ const bitcpy_lang = @import("bitcpy_lang");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const parsed = try parseArgs(args, init.io);
+    const parsed = try parseArgs(init.io, args);
     switch (parsed) {
         .help => try printHelp(init.io),
-        .version => try print(init.io, .stdout(), "bitcpy_lang 0.0.0\n", .{}),
+        .version => try print(init.io, .stdout(), "bitcpy 0.0.0\n", .{}),
         .run => |r| {
             var bytes = b: {
-                const code = try readFile(r.filename, init.gpa, init.io);
+                const code = try readFile(init.gpa, init.io, r.filename);
                 defer init.gpa.free(code);
                 break :b try bitcpy_lang.parseCode(init.gpa, code);
             };
@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn readFile(filename: []const u8, gpa: Alloc, io: Io) ![]u8 {
+fn readFile(gpa: Alloc, io: Io, filename: []const u8) ![]u8 {
     const file = try Io.Dir.cwd().openFile(io, filename, .{ .allow_directory = false });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
@@ -42,7 +42,7 @@ const ParseArgsResult = union(enum) {
     },
 };
 
-fn parseArgs(args: []const []const u8, io: Io) !ParseArgsResult {
+fn parseArgs(io: Io, args: []const []const u8) !ParseArgsResult {
     var opts: bitcpy_lang.RunOptions = .{};
 
     var i: usize = 1; // skip the path of the interpreter
