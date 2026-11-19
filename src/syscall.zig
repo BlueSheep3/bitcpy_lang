@@ -66,6 +66,37 @@ pub const SyscallNumber = enum(u32) {
     /// - `misaligned` if `arg2` is misaligned.
     sleep = 0x23,
 
+    /// Spawns a process with given command line arguments and file descriptors for stdio.
+    ///
+    /// The command line arguments are a slice of slices. This means that they are passed
+    /// in via a pointer in `arg2` and a length in `arg3`. These point to an array of more
+    /// pointers and lengths (in that order). Each of those encode a string in the
+    /// same slice format.
+    ///
+    /// The first command line argument is the path to the executable that you want to spawn.
+    /// If it is not already a path, this will search `PATH` for the given name.
+    ///
+    /// `arg4` is a pointer to 3 stdio specifiers. Each of those is 0x20 bits long.
+    /// The 3 stdio specifiers represent: stdin, stdout, stderr.
+    /// If a stdio specifier has a 0 as its most significant bit, it will be interpreted
+    /// as a file descriptor and the spawned process will use that file descriptor.
+    /// If a stdio specifier has a 1 as its most significant bit,
+    /// the rest of the value has a special meaning:
+    /// - 0: Use a stream that behaves like `/dev/null`.
+    /// - 1: Use the same file descriptor as the parent process.
+    /// - 2: Creates an anonymous pipe. Once the process gets spawned,
+    ///      the file descriptor of that pipe is written to this stdio specifier.
+    ///
+    /// # Errors
+    /// - `misaligned` if any of `arg2`, `arg3`, or `arg4` are misaligned
+    ///   or if `arg3` is not divisible by 0x40,
+    ///   or if any command line argument pointer or length is misaligned.
+    /// - `not_open` if any file descriptor in a stdio specifier is not open.
+    /// - `invalid_stdio` if a stdio specifier is special,
+    ///   but is not any of the values in the above list.
+    /// - `spawn_failed` if something fails during the actual spawn itself.
+    spawn = 0x3b,
+
     /// Exits the program with exit status `arg2`.
     ///
     /// The exit status will be truncated to fit into a `u8`.
@@ -116,10 +147,21 @@ pub const SyscallError = enum(u16) {
     /// The end of the stream was reached.
     /// When reading in a loop, this is the indicator that you should stop reading.
     end_of_stream = 0x19,
+
     /// The flags provided for the `open` syscall were invalid.
     /// This can happen by setting a bit with unspecified meaning to 1,
     /// or by enabling incompatible flags.
     invalid_open_flags = 0x20,
+    /// The stdio argument of the `spawn` syscall were invalid.
+    /// This happens when the most significant bit of one of the stdio args is 1,
+    /// but the rest of the number is greater than 2.
+    invalid_stdio = 0x21,
+
+    /// Generic error when a spawn fails.
+    /// This can happen when the executable file is not found or not executable.
+    /// This does NOT happen when the spawned process returns a non-zero exit status,
+    /// because the spawn syscall does not wait for the process to finish.
+    spawn_failed = 0x30,
 };
 
 pub const SyscallReturn = union(enum) {
@@ -134,29 +176,83 @@ pub const SyscallReturn = union(enum) {
 pub const Context = struct {
     opts: root.RunOptions,
 
-    fd_associations: switch (builtin.target.os.tag) {
-        .windows => std.AutoHashMapUnmanaged(u32, Io.File),
-        else => void,
-    },
-    max_fds: switch (builtin.target.os.tag) {
-        .windows => u32,
+    os: switch (builtin.target.os.tag) {
+        .windows => struct {
+            fd_assoc: std.AutoHashMapUnmanaged(u32, Io.File),
+            max_fd: u32,
+            pid_assoc: std.AutoHashMapUnmanaged(u32, std.os.windows.HANDLE),
+            max_pid: u32,
+        },
         else => void,
     },
 
     pub fn new(gpa: Alloc, opts: root.RunOptions) Alloc.Error!Context {
         switch (builtin.target.os.tag) {
             .windows => {
-                var fds: std.AutoHashMapUnmanaged(u32, Io.File) = .empty;
-                errdefer fds.deinit(gpa);
-                try fds.put(gpa, 0, .stdin());
-                try fds.put(gpa, 1, .stdout());
-                try fds.put(gpa, 2, .stderr());
-                return .{ .opts = opts, .fd_associations = fds, .max_fds = 2 };
+                var ctx: Context = .{
+                    .opts = opts,
+                    .os = .{
+                        .fd_assoc = .empty,
+                        .max_fd = 0,
+                        .pid_assoc = .empty,
+                        .max_pid = 0,
+                    },
+                };
+                errdefer ctx.os.fd_assoc.deinit(gpa);
+                _ = try ctx.addFile(gpa, .stdin());
+                _ = try ctx.addFile(gpa, .stdout());
+                _ = try ctx.addFile(gpa, .stderr());
+                return ctx;
             },
-            else => return .{ .opts = opts, .fd_associations = {}, .max_fds = {} },
+            else => return .{ .opts = opts, .os = {} },
+        }
+    }
+
+    pub fn deinit(ctx: *Context, gpa: Alloc) void {
+        switch (builtin.target.os.tag) {
+            .windows => ctx.os.fd_assoc.deinit(gpa),
+            else => {},
+        }
+    }
+
+    pub fn fdToFile(ctx: Context, fd: u32) ?Io.File {
+        return switch (builtin.target.os.tag) {
+            .windows => ctx.os.fd_assoc.get(fd),
+            else => .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } },
+        };
+    }
+
+    pub fn addFile(ctx: *Context, gpa: Alloc, file: Io.File) Alloc.Error!u32 {
+        switch (builtin.target.os.tag) {
+            .windows => {
+                ctx.os.max_fd += 1;
+                try ctx.os.fd_assoc.put(gpa, ctx.os.max_fd, file);
+                return ctx.os.max_fd;
+            },
+            else => return @intCast(file.handle),
+        }
+    }
+
+    pub fn removeFd(ctx: *Context, fd: u32) void {
+        switch (builtin.target.os.tag) {
+            .windows => _ = ctx.os.fd_assoc.remove(fd),
+            else => {},
+        }
+    }
+
+    pub fn addPid(ctx: *Context, gpa: Alloc, pid: std.process.Child.Id) Alloc.Error!u32 {
+        switch (builtin.target.os.tag) {
+            .windows => {
+                ctx.os.max_pid += 1;
+                try ctx.os.pid_assoc.put(gpa, ctx.os.max_pid, pid);
+                return ctx.os.max_pid;
+            },
+            else => return @intCast(pid),
         }
     }
 };
+
+// #######################################################################################
 
 fn readSyscallArg(bytes: *const ArrayList(u8), comptime arg_index: u3) u32 {
     const index = @as(u32, arg_index) * 4;
@@ -193,6 +289,7 @@ pub fn doSyscallAtArg1(gpa: Alloc, io: Io, ctx: *Context, bytes: *ArrayList(u8))
         .open => try doSyscallOpen(gpa, io, ctx, bytes),
         .close => doSyscallClose(io, ctx, bytes),
         .sleep => try doSyscallSleep(gpa, io, bytes),
+        .spawn => try doSyscallSpawn(gpa, io, ctx, bytes),
         .exit => std.process.exit(bytes.items[8]),
         .time => try doSyscallTime(gpa, io, bytes),
         .random => try doSyscallRandom(gpa, io, bytes),
@@ -237,19 +334,14 @@ pub fn traceSyscallReturn(io: Io, syscall: SyscallNumber, ret: SyscallReturn) Io
     try writer.interface.flush();
 }
 
-fn fd_to_file(ctx: Context, fd: u32) ?Io.File {
-    return switch (builtin.target.os.tag) {
-        .windows => ctx.fd_associations.get(fd),
-        else => .{ .handle = @intCast(fd), .flags = .{ .nonblocking = false } },
-    };
-}
-
 fn getAlignedSlice(gpa: Alloc, bytes: *ArrayList(u8), buf: u32, len: u32) Alloc.Error!?[]u8 {
     if (buf % 8 != 0 or len % 8 != 0)
         return null;
     try root.ensureLen(gpa, bytes, buf + len);
     return bytes.items[buf / 8 ..][0 .. len / 8];
 }
+
+// #######################################################################################
 
 fn doSyscallRead(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
     const fd = readSyscallArg(bytes, 2);
@@ -262,7 +354,7 @@ fn doSyscallRead(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) Alloc.
 
     const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
 
-    const file: Io.File = fd_to_file(ctx, fd) orelse return .{ .err = .not_open };
+    const file: Io.File = ctx.fdToFile(fd) orelse return .{ .err = .not_open };
     const read_count = file.readStreaming(io, &.{slice}) catch |err| switch (err) {
         error.NotOpenForReading => return .{ .err = .not_open },
         error.EndOfStream => return .{ .err = .end_of_stream },
@@ -279,7 +371,7 @@ fn doSyscallWrite(gpa: Alloc, io: Io, ctx: Context, bytes: *ArrayList(u8)) Alloc
     const len = readSyscallArg(bytes, 4);
     const slice = try getAlignedSlice(gpa, bytes, buf, len) orelse return .{ .err = .misaligned };
 
-    const file: Io.File = fd_to_file(ctx, fd) orelse return .{ .err = .not_open };
+    const file: Io.File = ctx.fdToFile(fd) orelse return .{ .err = .not_open };
     file.writeStreamingAll(io, slice) catch |err| switch (err) {
         error.NotOpenForWriting => return .{ .err = .not_open },
         else => return .{ .err = .write_failed },
@@ -323,26 +415,16 @@ fn doSyscallOpen(gpa: Alloc, io: Io, ctx: *Context, bytes: *ArrayList(u8)) Alloc
             return .{ .err = .open_failed };
     }
 
-    switch (builtin.target.os.tag) {
-        .windows => {
-            ctx.max_fds += 1;
-            try ctx.fd_associations.put(gpa, ctx.max_fds, file);
-            return .{ .val = @intCast(ctx.max_fds) };
-        },
-        else => return .{ .val = @intCast(file.handle) },
-    }
+    const fd = try ctx.addFile(gpa, file);
+    return .{ .val = @intCast(fd) };
 }
 
 fn doSyscallClose(io: Io, ctx: *Context, bytes: *const ArrayList(u8)) SyscallReturn {
     const fd = readSyscallArg(bytes, 2);
 
-    const file: Io.File = fd_to_file(ctx.*, fd) orelse return .{ .err = .not_open };
+    const file: Io.File = ctx.fdToFile(fd) orelse return .{ .err = .not_open };
     file.close(io);
-
-    switch (builtin.target.os.tag) {
-        .windows => _ = ctx.fd_associations.remove(fd),
-        else => {},
-    }
+    ctx.removeFd(fd);
 
     return .none;
 }
@@ -355,6 +437,58 @@ fn doSyscallSleep(gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!Syscall
     const duration: Io.Duration = .fromNanoseconds(@bitCast(slice[0 .. len / 8].*));
     io.sleep(duration, .real) catch unreachable;
     return .none;
+}
+
+fn doSyscallSpawn(gpa: Alloc, io: Io, ctx: *Context, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {
+    const args_ptr = readSyscallArg(bytes, 2);
+    const args_len = readSyscallArg(bytes, 3);
+    const stdio_ptr = readSyscallArg(bytes, 4);
+
+    const args_slice = try getAlignedSlice(gpa, bytes, args_ptr, args_len) orelse
+        return .{ .err = .misaligned };
+    if (args_len % 0x40 != 0)
+        return .{ .err = .misaligned };
+    const argv: [][]const u8 = try gpa.alloc([]const u8, args_len / 0x40);
+    defer gpa.free(argv);
+    for (0..argv.len, argv) |i, *a| {
+        const args_slice_part = args_slice[i * (0x40 / 8) ..][0 .. 0x40 / 8];
+        const ptr, const len = @as([2]u32, @bitCast(args_slice_part.*));
+        a.* = try getAlignedSlice(gpa, bytes, ptr, len) orelse return .{ .err = .misaligned };
+    }
+
+    const stdio_slice = try getAlignedSlice(gpa, bytes, stdio_ptr, 0x60) orelse
+        return .{ .err = .misaligned };
+    const stdio_ints = @as([3]u32, @bitCast(stdio_slice[0 .. 0x60 / 8].*));
+    var stdio: [3]std.process.SpawnOptions.StdIo = undefined;
+    for (stdio_ints, &stdio) |int, *s| {
+        if (int & 0x8000_0000 == 0) {
+            const file = ctx.fdToFile(int) orelse return .{ .err = .not_open };
+            s.* = .{ .file = file };
+        } else switch (int & 0x7fff_ffff) {
+            0 => s.* = .ignore,
+            1 => s.* = .inherit,
+            2 => s.* = .pipe,
+            else => return .{ .err = .invalid_stdio },
+        }
+    }
+
+    const child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = stdio[0],
+        .stdout = stdio[1],
+        .stderr = stdio[2],
+    }) catch return .{ .err = .spawn_failed };
+
+    inline for (0..3, stdio, .{ "stdin", "stdout", "stderr" }) |i, s, name| {
+        if (s == .pipe) {
+            const file: Io.File = @field(child, name).?;
+            const fd = try ctx.addFile(gpa, file);
+            stdio_slice[i * (0x20 / 8) ..][0 .. 0x20 / 8].* = @bitCast(fd);
+        }
+    }
+
+    const child_pid = try ctx.addPid(gpa, child.id.?);
+    return .{ .val = @intCast(child_pid) };
 }
 
 fn doSyscallTime(gpa: Alloc, io: Io, bytes: *ArrayList(u8)) Alloc.Error!SyscallReturn {

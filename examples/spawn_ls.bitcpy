@@ -1,0 +1,13 @@
+#!/usr/bin/env bitcpy
+
+[ .00000000 ] 0c200000 00000000 08100000 08000000 00200000 aaaaaaaa aaaaaaaa aaaaaaaa
+
+[ .00100000 ] c637d2d2 36f6c6f6 27d316c6 77169737 [ "ls--color=always" string ]
+[ .08100000 ] 00100000 01000000 01100000 07000000 [ argv slice ]
+[ .00200000 ] 10000008 10000008 10000008 [ all inherit stdio ]
+[ .06200000 ] b3000000 [ spawn syscall number ]
+[ .08200000 ] c3000000 00000000 [ exit syscall number and exit code 0]
+
+[ .0c200000 ] 06200000 02000000 02000000 [ do spawn syscall ]
+[ .02300000 ] f3000000 0a200000 10000000 [ write error bit to exit code ]
+[ .08300000 ] 08200000 02000000 04000000 [ do exit syscall ]

@@ -69,6 +69,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
     try ensureLen(gpa, bytes, 0x100);
 
     var ctx: Context = try .new(gpa, opts);
+    defer ctx.deinit(gpa);
 
     while (true) {
         if (opts.trace_memory)
