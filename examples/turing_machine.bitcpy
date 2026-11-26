@@ -1,0 +1,250 @@
+#!/usr/bin/env bitcpy
+
+[ Runs a turing machine ]
+[
+  A turing machine is described as a table of state transitions.
+  Each state gets 2 bytes for what to do when encountering a 0 and another 2 bytes for 1.
+  Each byte is of the form BMSS, where B and M must be either 0 or 1.
+  (if they set more bits to 1, those bits will simply be ignored)
+  B is what the bit at the current position will be set to.
+  M is what direction to move to: 0 is right, 1 is left.
+  SS is what to set the state to. Setting this to ff will halt the machine.
+
+  There is a list of turing machines at the bottom of this file.
+  Also check out the settings.
+]
+[
+  Limitations:
+  - The turing machine can have at most ff states
+  - The tape has a length of 00001 bits, wrapping around on both ends
+]
+[
+  This currently still has a lot of TODOs with the tracing functions,
+  so with these settings you will simply get a single string being
+  printed for every state transition. This string will contain information
+  about what the state transition is doing in the future, but not right now.
+  You can still use it to count the number of state transitions though.
+  For example, running `bitcpy examples/turing_machine.bitcpy | wc -l`
+  will print 21, because the 3 state busy beaver takes 21 steps to halt.
+]
+
+
+
+[ .00000000 ] 00010000 aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa aaaaaaaa
+
+[ settings ]
+[ .00100000 ] 08020000 30000000 [ address of state transition table and number of states ]
+[ .04100000 ] 10000000 [ fd to write traces to ]
+[ .06100000 ] 10000000 [ fd to write final tape to ]
+[ .08100000 ] aaaaaaaa aaaaaaaa
+[ this will only perform a single read syscall,
+  meaning the table must be written with a single write syscall ]
+[ .0c100000 ] 0 [ read state table from stdin instead of specified pointer ]
+[ .4c100000 ] 1 [ trace state transitions ]
+[ .8c100000 ] 0 [ trace tape ] [ currently doesn't work ]
+[ .cc100000 ] 0 [ print tape when halting ] [ currently doesn't work ]
+[ .0d100000 ] aaaa aaaaaaaa
+[ .00200000 ]
+
+
+[
+  .0000_0000 - .0008_0000  bitcpy program memory
+  .0008_0000 - .0000_1000  turing machine program memory
+  .0000_1000 - .0000_2000  turing machine tape memory
+]
+
+
+[ misc constants ]
+[ .00200000 ] 00000000 00000000
+[ .04200000 ] 10000000 10000000
+[ .08200000 ] ffffffff
+[ .0a200000 ] c3000000 [ exit syscall ]
+[ .0c200000 ] 00080000
+[ .0e200000 ] 00001000
+[ .00300000 ] 25c4 [ "RL" string ]
+[ .01300000 ] a3020302030302d2e302030203020303a000 [ ": 0 00 -> 0 0 00\n\0" string ]
+[ .0a300000 ] 00200000 [ dumpmem syscall ]
+
+[ lookup tables ]
+[ .0c300000 ] fff7 [ != f ]
+[ .0d300000 ] efff [ != 0 ]
+[ .0e300000 ] aaaaaaaa
+[ .00400000 ] 12345678 9abcdef0 [ increment ]
+[ .04400000 ] f0123456 789abcde [ decrement ]
+[ .08400000 ] 01234567 89abcdef
+[ .0c400000 ] fff7 [ increment overflow (0 on overflow) ]
+[ .0d400000 ] efff [ decrement overflow (0 on overflow) ]
+[ .0e400000 ] ffff0000 [ loop continuation ]
+[ .00500000 ] 03132333 43536373 83931626 36465666 [ hex digit chars ]
+
+[ turing machine state ]
+[ When modifying the pointer, make sure to only modify the first 01 bits. ]
+[ This way, if the pointer goes too far left or right, it will simply wrap ]
+[ around to the other end, effectively giving a circular tape. ]
+[ .08500000 ] 00081000 [ pointer to current bit in tape ]
+[ .0a500000 ] aaaaaaaa
+[ .0c500000 ] aaaaaaaa
+[ .0e500000 ] 00 [ current state ]
+[ .8e500000 ] 00 [ temporary place for bit at pointer ]
+[ .0f500000 ] aaaa [ temporary copy of current state transition ]
+[ .00600000 ] aaaaaaaa [ temporary copy of pointer ]
+[ .02600000 ] aaaaaaaa
+[ .04600000 ] 
+
+
+[ increment/decrement pointer function ]
+
+[ .04600000 ] 00700000 [ call address (A) ]
+[ .06600000 ] 0e710000 [ return address (already correct for main function) ]
+[ .08600000 ] 00000000 [ 0: increment, 1: decrement ]
+[ .0a600000 ] aaaaaaaa
+[ .0c600000 ] aaaaaaaa
+[ .0e600000 ] 00000000 [ i ]
+[ .00700000 ] 02800000 [ start of loop (S) ]
+[ .02700000 ] 00000000 [ current hex digit ]
+[ .04700000 ] aaaaaaaa
+
+[ .06700000 ] 08600000 60a00000 10000000 [ A: adjust inc/dec lookup pointer of L ]
+[ .0c700000 ] 08600000 4ca00000 10000000 [    adjust inc/dec overflow lookup pointer of O ]
+[ .02800000 ] 00200000 0e600000 02000000 [    i = 0 ]
+[ .08800000 ] 0e600000 2e800000 20000000 [ S: current hex digit = digit at i ]
+[ .0e800000 ] 08500000 02700000 40000000 [    current hex digit = digit at i ]
+[ .04900000 ] 02700000 20a00000 40000000 [    write current to source of L ]
+[ .0a900000 ] 0e600000 22a00000 20000000 [    write i to dest of L ]
+[ .00a00000 ] 00400000 08500000 40000000 [ L: lookup inc/dec of current, write to pointer at i ]
+[ .06a00000 ] 02700000 0ca00000 40000000 [    write current to source of O ]
+[ .0ca00000 ] 0c400000 56b00000 10000000 [ O: write overflow lookup to R ]
+[ .02b00000 ] 06600000 00000000 00000000 [ R: if not overflow (lookup has 1), jump to return ]
+[ .08b00000 ] 0e600000 2eb00000 30000000 [    increment i ]
+[ .0eb00000 ] 00400000 0e600000 30000000 [    increment i ]
+[ .04c00000 ] 0e600000 2ac00000 30000000 [    write i to next instruction ]
+[ .0ac00000 ] 0e400000 54d00000 10000000 [    lookup loop continuation, write to E ]
+[ .00d00000 ] 00700000 00000000 00000000 [ E: if loop continuation is 1, jump to S ]
+[ .06d00000 ] 06600000 00000000 02000000 [    return ]
+
+
+[ .0cd00000 ] aaaaaaaa aaaaaaaa aaaaaaaa
+
+
+
+[ main function ]
+
+[ .02e00000 ] 04210000 [ I ]
+[ .04e00000 ] 0c310000 [ M ]
+[ .06e00000 ] 0e710000 [ final trace tape return ]
+[ .08e00000 ] 06310000 [ A ]
+[ .0ae00000 ] aaaaaaaa
+[ .0ce00000 ] aaaaaaaa
+[ .0ee00000 ] aaaaaaaa
+
+[ lookup table for != ff ]
+[ .00f00000 ] ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff ffffffff fffffff7
+
+[ setup for running the machine ]
+[ grow the memory ahead of time, so that it doesn't have to grow later ]
+[ and write the state transition table to a standardized place ]
+[ .00010000 ] 00200000 ffff1000 10000000 [    ensure that the memory has 00002 bits ]
+[ .06010000 ] 0c100000 50110000 10000000 [    should this use stdin? ]
+[ .0c010000 ] 02e00000 00000000 00000000 [    if so, jump to I ]
+[ .02110000 ] 00100000 0e110000 02000000 [    copy table pointer to C ]
+[ .08110000 ] 02100000 52210000 80000000 [    copy state count to C ]
+[ .0e110000 ] aaaaaaaa 00080000 00000000 [ C: copy turing machine to correct place ]
+[ .04210000 ] 08e00000 00000000 02000000 [    jump to A ]
+[ .0a210000 ] 0c200000 06000000 02000000 [ I: set read ptr to 0008 ]
+[ .00310000 ] 0c200000 08000000 02000000 [    set read len to 0008 ]
+[ .06310000 ] 00200000 02000000 04000000 [    perform read syscall ]
+[ .0c310000 ] 04100000 04000000 02000000 [ A: set fd for trace writing ]
+
+[ actually running the machine]
+[ .02410000 ] 08500000 08410000 01000000 [ M: read current bit ]
+[ .08410000 ] aaaa1000 8e500000 10000000 [    write current bit to fixed location ]
+[ .0e410000 ] 8e500000 4a510000 10000000 [    adjust source of W based on current bit ]
+[ .04510000 ] 0e500000 5a510000 80000000 [    adjust source of W based on current state ]
+[ .0a510000 ] 00080000 0f500000 01000000 [ W: write state transition to fixed location ]
+[ .00610000 ] 4c100000 5a610000 10000000 [    should we trace state transitions? ]
+[ .06610000 ] 0cc10000 00000000 00000000 [    if so, call trace state transition ]
+[ .0c610000 ] 08500000 04710000 01000000 [    set address of B to tape pointer ]
+[ .02710000 ] 0f500000 aaaa1000 10000000 [ B: write new bit to tape ]
+[ .08710000 ] 4f500000 08600000 10000000 [    decide inc/dec based on R/L ]
+[ .0e710000 ] 04600000 00000000 02000000 [    call inc/dec pointer ]
+[ .04810000 ] 8f500000 0e500000 80000000 [    set new state ]
+[ .0a810000 ] 8c100000 54910000 10000000 [    should we trace the tape? ]
+[ .00910000 ] 0cd10000 00000000 00000000 [    if so, call trace tape ]
+[ .06910000 ] 0e500000 0c910000 80000000 [    is state != ff? ]
+[ .0c910000 ] 00f00000 56a10000 10000000 [    is state != ff? ]
+[ .02a10000 ] 04e00000 00000000 00000000 [    if so, jump to M ]
+[ .08a10000 ] 06100000 04000000 02000000 [    set final tape fd ]
+[ .0ea10000 ] 06e00000 0ad10000 02000000 [    set return address of trace tape ]
+[ .04b10000 ] cc100000 5eb10000 10000000 [    should we trace the final tape? ]
+[ .0ab10000 ] 0cd10000 00000000 00000000 [    if so, call trace tape ]
+[ .00c10000 ] 00200000 04000000 02000000 [    set exit status to 0 ]
+[ .06c10000 ] 0a200000 02000000 02000000 [    do exit syscall ]
+
+
+
+
+[ trace state transition function ]
+[ TODO this currently doesnt actually show any of the values in the state transition ]
+
+[ .0cc10000 ] 08d10000 [ call address ]
+[ .0ec10000 ] 06610000 [ return address (already correct for main function) ]
+[ .00d10000 ] 01300000 88000000 [ string buffer ]
+[ .04d10000 ] aaaaaaaa
+[ .06d10000 ] aaaaaaaa
+[ .08d10000 ] aaaaaaaa
+[ .0ad10000 ] BBBBBBBB [ temporary place for the trace tape return address ]
+[ .0cd10000 ] BBBBBBBB [ temporary place for the trace tape call address ]
+
+[ .0ed10000 ] 00d10000 06000000 04000000 [ write string buffer ]
+[ .04e10000 ] 04200000 02000000 02000000 [ do write syscall ]
+[ .0ae10000 ] 0ec10000 00000000 02000000 [ return ]
+
+[ .00f10000 ] aaaaaaaa aaaaaaaa aaaaaaaa
+[ .06f10000 ] aaaaaaaa aaaaaaaa aaaaaaaa
+[ .0cf10000 ] aaaaaaaa aaaaaaaa aaaaaaaa
+[ .02020000 ]
+
+
+
+
+[ TODO trace tape ]
+
+
+
+
+[ List of Turing Machines ]
+
+[ ptr and count = 02020000 10000000 ]
+[ 1 state busy beaver: 0RZ--- ]
+[ runs for 1 step ]
+[ 00 ] 00ff ffff
+
+[ ptr and count = 04020000 20000000 ]
+[ 2 state busy beaver: 1RB1LB_1LA1RZ ]
+[ runs for 6 steps ]
+[ 00 ] 1010 1110
+[ 10 ] 1100 10ff
+
+[ ptr and count = 08020000 30000000 ]
+[ 3 state busy beaver: 1RB1RZ_1LB0RC_1LC1LA ]
+[ runs for (decimal) 21 steps ]
+[ 00 ] 1010 10ff
+[ 10 ] 1110 0020
+[ 20 ] 1120 1100
+
+[ ptr and count = 0e020000 40000000 ]
+[ 4 state busy beaver: 1RB1LB_1LA0LC_1RZ1LD_1RD0RA ]
+[ runs for (decimal) 107 steps ]
+[ 00 ] 1010 1110
+[ 10 ] 1100 0120
+[ 20 ] 10ff 1130
+[ 30 ] 1030 0000
+
+[ ptr and count = 06120000 50000000 ]
+[ 5 state busy beaver: 1RB1LC_1RC1RB_1RD0LE_1LA1LD_1RZ0LA ]
+[ runs for (decimal) 47_176_870 steps ]
+[ 00 ] 1010 1120
+[ 10 ] 1020 1010
+[ 20 ] 1030 0140
+[ 30 ] 1100 1130
+[ 40 ] 10ff 0100

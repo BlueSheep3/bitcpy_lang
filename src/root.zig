@@ -89,7 +89,7 @@ pub fn runProgram(gpa: Alloc, io: Io, bytes: *ArrayList(u8), opts: RunOptions) R
         const count = readU32(bytes, pc + 0x40);
 
         if (opts.trace_command)
-            traceCommand(io, source, dest, count) catch {};
+            traceCommand(io, pc, source, dest, count) catch {};
 
         try bitcpyImpure(gpa, io, &ctx, bytes, source, dest, count);
 
@@ -220,12 +220,13 @@ pub fn ensureLen(gpa: Alloc, bytes: *ArrayList(u8), required_bitlen: usize) Allo
     }
 }
 
-pub fn traceCommand(io: Io, source: u32, dest: u32, count: u32) Io.Writer.Error!void {
-    var buffer: [40]u8 = undefined;
-    @memcpy(&buffer, "running: [XXXXXXXX, XXXXXXXX, XXXXXXXX]\n");
-    writeFlippedHexInt(buffer[10..18], source);
-    writeFlippedHexInt(buffer[20..28], dest);
-    writeFlippedHexInt(buffer[30..38], count);
+pub fn traceCommand(io: Io, pc: u32, source: u32, dest: u32, count: u32) Io.Writer.Error!void {
+    var buffer: [50]u8 = undefined;
+    @memcpy(&buffer, "at XXXXXXXX running: [XXXXXXXX XXXXXXXX XXXXXXXX]\n");
+    writeFlippedHexInt(buffer[3..][0..8], pc);
+    writeFlippedHexInt(buffer[22..][0..8], source);
+    writeFlippedHexInt(buffer[31..][0..8], dest);
+    writeFlippedHexInt(buffer[40..][0..8], count);
     Io.File.stderr().writeStreamingAll(io, &buffer) catch return error.WriteFailed;
 }
 

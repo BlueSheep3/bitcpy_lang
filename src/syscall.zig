@@ -308,10 +308,10 @@ pub fn traceSyscall(io: Io, bytes: *const ArrayList(u8), syscall: SyscallNumber)
 
     try writer.interface.print("syscall: {t}", .{syscall});
 
-    var args: [61]u8 = undefined;
-    @memcpy(&args, "(XXXXXXXX, XXXXXXXX, XXXXXXXX, XXXXXXXX, XXXXXXXX, XXXXXXXX)\n");
+    var args: [56]u8 = undefined;
+    @memcpy(&args, "(XXXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX)\n");
     inline for (0..6) |i|
-        root.writeFlippedHexInt(args[1 + i * 10 ..][0..8], readSyscallArg(bytes, i + 2));
+        root.writeFlippedHexInt(args[1 + i * 9 ..][0..8], readSyscallArg(bytes, i + 2));
     try writer.interface.writeAll(&args);
 
     try writer.interface.flush();
